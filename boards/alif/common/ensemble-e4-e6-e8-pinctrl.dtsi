@@ -269,6 +269,16 @@
 		};
 	};
 
+	pinctrl_i2c2: pinctrl_i2c2 {
+		group0 {
+			pinmux = < PIN_P5_0__I2C2_SDA_B >,
+				 < PIN_P5_1__I2C2_SCL_B >;
+
+			read-enable = < 0x1 >;
+			driver-state-control = < 0x1 >;
+		};
+	};
+
 	pinctrl_lpi2c0: pinctrl_lpi2c0 {
 		group0 {
 			pinmux = < PIN_P7_5__LPI2C0_SDA_A >,
