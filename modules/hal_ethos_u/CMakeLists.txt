@@ -3,7 +3,39 @@
 # SPDX-License-Identifier: Apache-2.0
 
 if(CONFIG_ARM_ETHOS_U AND CONFIG_MULTITHREADING)
-    set(ETHOSU_TARGET_NPU_CONFIG ${CONFIG_ARM_ETHOS_U_NPU_NAME})
+    # Select the Ethos-U target config from the resolved Kconfig choice.
+    # Keep this in CMake cache (FORCE) so the downstream ethos-u module does
+    # not fall back to its internal default (ethos-u55-128).
+    if(CONFIG_ARM_ETHOS_U55_64)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u55-64")
+    elseif(CONFIG_ARM_ETHOS_U55_128)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u55-128")
+    elseif(CONFIG_ARM_ETHOS_U55_256)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u55-256")
+    elseif(CONFIG_ARM_ETHOS_U65_128)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u65-128")
+    elseif(CONFIG_ARM_ETHOS_U65_256)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u65-256")
+    elseif(CONFIG_ARM_ETHOS_U65_512)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u65-512")
+    elseif(CONFIG_ARM_ETHOS_U85_128)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u85-128")
+    elseif(CONFIG_ARM_ETHOS_U85_256)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u85-256")
+    elseif(CONFIG_ARM_ETHOS_U85_512)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u85-512")
+    elseif(CONFIG_ARM_ETHOS_U85_1024)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u85-1024")
+    elseif(CONFIG_ARM_ETHOS_U85_2048)
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u85-2048")
+    elseif(DEFINED CONFIG_ARM_ETHOS_U_NPU_NAME AND NOT "${CONFIG_ARM_ETHOS_U_NPU_NAME}" STREQUAL "")
+        set(_ETHOSU_TARGET_NPU_CONFIG "${CONFIG_ARM_ETHOS_U_NPU_NAME}")
+    else()
+        set(_ETHOSU_TARGET_NPU_CONFIG "ethos-u55-128")
+    endif()
+
+    set(ETHOSU_TARGET_NPU_CONFIG "${_ETHOSU_TARGET_NPU_CONFIG}" CACHE STRING
+        "Ethos-U core driver target configuration" FORCE)
 
     # Mapping log level from Zephyr (none=0, err=1, wrn=2, inf=3, dbg=4) to
     # Ethos-U driver (err=0, warn=1, info=2, debug=3)
