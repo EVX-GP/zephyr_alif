@@ -25,6 +25,8 @@ LOG_MODULE_REGISTER(OSPI_FLASH, CONFIG_FLASH_LOG_LEVEL);
 
 #define ADDR_IS_SEC_ALIGNED(addr, _bits) ((addr)&BIT_MASK(_bits))
 #define FLASH_SEC_SIZE_BIT               12
+#define CMD_ENTER_DEEP_POWER_DOWN        0xB9U
+#define CMD_RELEASE_DEEP_POWER_DOWN      0xABU
 
 static void flash_alif_ospi_irq_config_func(const struct device *dev);
 
@@ -84,6 +86,133 @@ static inline int32_t set_cs_pin(HAL_OSPI_Handle_T handle, int activate)
 
 	ret = err_map_alif_hal_to_zephyr(ret);
 	return ret;
+}
+
+static int flash_is25wx_send_simple_cmd(const struct device *dev, uint8_t command)
+{
+	uint32_t cmd_buf;
+	uint32_t event;
+	int32_t ret;
+	struct alif_flash_ospi_dev_data *dev_data = dev->data;
+
+	dev_data->trans_conf.frame_size = OSPI_DFS_BITS_8;
+	dev_data->trans_conf.frame_format = OSPI_FRF_OCTAL;
+	dev_data->trans_conf.addr_len = OSPI_ADDR_LENGTH_0_BITS;
+	dev_data->trans_conf.wait_cycles = 0;
+	dev_data->trans_conf.ddr_enable = OSPI_DDR_ENABLE;
+
+	ret = alif_hal_ospi_prepare_transfer(dev_data->ospi_handle, &dev_data->trans_conf);
+	if (ret != 0) {
+		return err_map_alif_hal_to_zephyr(ret);
+	}
+
+	ret = set_cs_pin(dev_data->ospi_handle, SLAVE_ACTIVATE);
+	if (ret != 0) {
+		return ret;
+	}
+
+	k_event_clear(&dev_data->event_f, OSPI_EVENT_TRANSFER_COMPLETE | OSPI_EVENT_DATA_LOST);
+
+	cmd_buf = command;
+	ret = alif_hal_ospi_send(dev_data->ospi_handle, &cmd_buf, 1U);
+	if (ret != 0) {
+		(void)set_cs_pin(dev_data->ospi_handle, SLAVE_DE_ACTIVATE);
+		return err_map_alif_hal_to_zephyr(ret);
+	}
+
+	event = k_event_wait(&dev_data->event_f,
+			     OSPI_EVENT_TRANSFER_COMPLETE | OSPI_EVENT_DATA_LOST,
+			     false, K_FOREVER);
+	if (!(event & OSPI_EVENT_TRANSFER_COMPLETE)) {
+		(void)set_cs_pin(dev_data->ospi_handle, SLAVE_DE_ACTIVATE);
+		return -EIO;
+	}
+
+	ret = set_cs_pin(dev_data->ospi_handle, SLAVE_DE_ACTIVATE);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return 0;
+}
+
+int alif_flash_ospi_enter_dpd(const struct device *dev)
+{
+	struct alif_flash_ospi_dev_data *dev_data;
+	int ret;
+
+	if (dev == NULL) {
+		return -EINVAL;
+	}
+
+	dev_data = dev->data;
+	ret = k_sem_take(&dev_data->sem, K_MSEC(MAX_SEM_TIMEOUT));
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (dev_data->deep_power_down) {
+		k_sem_give(&dev_data->sem);
+		return 0;
+	}
+
+	if (IS_ENABLED(CONFIG_ALIF_OSPI_FLASH_XIP)) {
+		(void)alif_hal_ospi_xip_disable(dev_data->ospi_handle);
+	}
+
+	ret = flash_is25wx_send_simple_cmd(dev, CMD_ENTER_DEEP_POWER_DOWN);
+	if (ret == 0) {
+		k_sleep(K_USEC(50));
+		dev_data->deep_power_down = true;
+	}
+
+	k_sem_give(&dev_data->sem);
+	return ret;
+}
+
+int alif_flash_ospi_exit_dpd(const struct device *dev)
+{
+	struct alif_flash_ospi_dev_data *dev_data;
+	int ret;
+
+	if (dev == NULL) {
+		return -EINVAL;
+	}
+
+	dev_data = dev->data;
+	ret = k_sem_take(&dev_data->sem, K_MSEC(MAX_SEM_TIMEOUT));
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (!dev_data->deep_power_down) {
+		k_sem_give(&dev_data->sem);
+		return 0;
+	}
+
+	ret = flash_is25wx_send_simple_cmd(dev, CMD_RELEASE_DEEP_POWER_DOWN);
+	if (ret == 0) {
+		k_sleep(K_USEC(200));
+		dev_data->deep_power_down = false;
+		if (IS_ENABLED(CONFIG_ALIF_OSPI_FLASH_XIP)) {
+			(void)alif_hal_ospi_xip_enable(dev_data->ospi_handle);
+		}
+	}
+
+	k_sem_give(&dev_data->sem);
+	return ret;
+}
+
+bool alif_flash_ospi_is_in_dpd(const struct device *dev)
+{
+	const struct alif_flash_ospi_dev_data *dev_data;
+
+	if (dev == NULL) {
+		return false;
+	}
+
+	dev_data = dev->data;
+	return dev_data->deep_power_down;
 }
 
 static int32_t read_status_reg(const struct device *dev, uint8_t command, uint8_t *stat)

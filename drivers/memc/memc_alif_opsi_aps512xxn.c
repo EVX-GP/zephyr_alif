@@ -54,6 +54,13 @@ LOG_MODULE_REGISTER(memc_alif_aps512xxn, CONFIG_MEMC_LOG_LEVEL);
 #define APS256XXN_OSPI_RX_FIFO_THRESHOLD       0
 #define APS256XXN_OSPI_DFS                     16
 
+#define APS512XXN_POWER_ACTIVE                 0U
+#define APS512XXN_POWER_HALFSLEEP              1U
+#define APS512XXN_POWER_DEEP_POWER_DOWN        2U
+
+#define APS512XXN_MODE_REG6_HALFSLEEP          0xF0U
+#define APS512XXN_MODE_REG6_DEEP_POWER_DOWN    0xC0U
+
 /**IRQ declaration */
 typedef void (*irq_config_func_t)(const struct device *dev);
 
@@ -77,6 +84,7 @@ struct alif_ospi_aps512xxn_data {
 	HAL_OSPI_Handle_T ospi_handle;
 	struct ospi_trans_config trans_conf;
 	struct k_event event;
+	uint8_t power_state;
 };
 
 static int32_t err_map_alif_hal_to_zephyr(int32_t err)
@@ -239,12 +247,140 @@ irq_failed:
 	return ret;
 }
 
+static void aps512xxn_exit_low_power_pulse(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_config *config = dev->config;
+
+	ospi_control_ss(config->regs, config->cs_pin, SPI_SS_STATE_ENABLE);
+	k_busy_wait(1);
+	ospi_control_ss(config->regs, config->cs_pin, SPI_SS_STATE_DISABLE);
+}
+
+static int aps512xxn_configure_runtime(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_config *config = dev->config;
+	struct ospi_xip_config aps512xxn_xip_cfg;
+	uint8_t id_reg = 0;
+	int32_t ret;
+
+	ret = aps512xxn_global_reset(dev);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Global Reset Failed");
+		return ret;
+	}
+
+	ret = aps512xxn_read_reg(dev, APS256XXN_MODE_REG2_ADDR, &id_reg,
+				APS256XXN_INIT_REG_READ_WAIT_CYCLES);
+	if ((ret != 0) || (id_reg != APS256XXN_ID)) {
+		LOG_ERR("APS512XXN Read ID Reg Failed");
+		return ret;
+	}
+
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG0_ADDR, 0x04);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 0 Config Failed");
+		return ret;
+	}
+
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG4_ADDR, 0x98);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 4 Config Failed");
+		return ret;
+	}
+
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG8_ADDR,
+				  config->dual_octal ? 0x41 : 0x01);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 8 Config Failed");
+		return ret;
+	}
+
+	aps512xxn_xip_cfg.xip_mod_bits = 0;
+	aps512xxn_xip_cfg.incr_cmd = APS256XXN_CMD_LINEAR_BURST_READ;
+	aps512xxn_xip_cfg.wrap_cmd = APS256XXN_CMD_SYNC_READ;
+	aps512xxn_xip_cfg.write_incr_cmd = APS256XXN_CMD_LINEAR_BURST_WRITE;
+	aps512xxn_xip_cfg.write_wrap_cmd = APS256XXN_CMD_SYNC_WRITE;
+	aps512xxn_xip_cfg.xip_cnt_time_out = config->xip_wait_cycles;
+	aps512xxn_xip_cfg.xip_wait_cycles = APS256XXN_FAST_READ_WRITE_WAIT_CYCLES;
+
+	ospi_psram_xip_init(config->regs, &aps512xxn_xip_cfg, config->dual_octal);
+	aes_enable_xip(config->aes_regs);
+
+	return 0;
+}
+
+int alif_psram_set_power_state(const struct device *dev, uint8_t state)
+{
+	struct alif_ospi_aps512xxn_data *data;
+	int ret = 0;
+
+	if (dev == NULL) {
+		return -EINVAL;
+	}
+
+	data = dev->data;
+
+	if (data->power_state == state) {
+		return 0;
+	}
+
+	if (data->power_state != APS512XXN_POWER_ACTIVE) {
+		aps512xxn_exit_low_power_pulse(dev);
+		if (data->power_state == APS512XXN_POWER_HALFSLEEP) {
+			k_busy_wait(200);
+		} else {
+			k_busy_wait(200);
+			ret = aps512xxn_configure_runtime(dev);
+			if (ret != 0) {
+				return ret;
+			}
+		}
+		data->power_state = APS512XXN_POWER_ACTIVE;
+	}
+
+	switch (state) {
+	case APS512XXN_POWER_ACTIVE:
+		return 0;
+
+	case APS512XXN_POWER_HALFSLEEP:
+		ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG6_ADDR,
+					  APS512XXN_MODE_REG6_HALFSLEEP);
+		if (ret == 0) {
+			k_busy_wait(200);
+			data->power_state = state;
+		}
+		return ret;
+
+	case APS512XXN_POWER_DEEP_POWER_DOWN:
+		ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG6_ADDR,
+					  APS512XXN_MODE_REG6_DEEP_POWER_DOWN);
+		if (ret == 0) {
+			k_busy_wait(600);
+			data->power_state = state;
+		}
+		return ret;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+uint8_t alif_psram_get_power_state(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_data *data;
+
+	if (dev == NULL) {
+		return APS512XXN_POWER_ACTIVE;
+	}
+
+	data = dev->data;
+	return data->power_state;
+}
+
 static int memc_alif_ospi_aps512xxn_init(const struct device *dev)
 {
 	const struct alif_ospi_aps512xxn_config *config = dev->config;
 	struct alif_ospi_aps512xxn_data *data = dev->data;
-	struct ospi_xip_config aps512xxn_xip_cfg;
-	uint8_t id_reg = 0;
 	int32_t ret;
 	struct ospi_init init_config;
 
@@ -298,56 +434,12 @@ static int memc_alif_ospi_aps512xxn_init(const struct device *dev)
 		return -EINVAL;
 	}
 
-	/* APS256XXN global reset */
-	ret = aps512xxn_global_reset(dev);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Global Reset Failed");
-		return ret;
+	ret = aps512xxn_configure_runtime(dev);
+	if (ret == 0) {
+		data->power_state = APS512XXN_POWER_ACTIVE;
 	}
 
-	/* Read APS256XXN ID */
-	ret = aps512xxn_read_reg(dev, APS256XXN_MODE_REG2_ADDR, &id_reg,
-				APS256XXN_INIT_REG_READ_WAIT_CYCLES);
-	if ((ret != 0) || (id_reg != APS256XXN_ID)) {
-		LOG_ERR("APS512XXN Read ID Reg Failed");
-		return ret;
-	}
-
-	/* Set minimum read latency (4 cycles), variable latency */
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG0_ADDR, 0x04);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 0 Config Failed");
-		return ret;
-	}
-
-	/* Set minimum write latency (4 cycles), auto slow refresh rate */
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG4_ADDR, 0x98);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 4 Config Failed");
-		return ret;
-	}
-
-	/* Set transmission mode (x8/x16), 32-byte wrap, no row cross */
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG8_ADDR, config->dual_octal ? 0x41 : 0x01);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 8 Config Failed");
-		return ret;
-	}
-
-	aps512xxn_xip_cfg.xip_mod_bits = 0;
-	aps512xxn_xip_cfg.incr_cmd = APS256XXN_CMD_LINEAR_BURST_READ;
-	aps512xxn_xip_cfg.wrap_cmd = APS256XXN_CMD_SYNC_READ;
-	aps512xxn_xip_cfg.write_incr_cmd = APS256XXN_CMD_LINEAR_BURST_WRITE;
-	aps512xxn_xip_cfg.write_wrap_cmd = APS256XXN_CMD_SYNC_WRITE;
-	aps512xxn_xip_cfg.xip_cnt_time_out = config->xip_wait_cycles;
-	aps512xxn_xip_cfg.xip_wait_cycles = APS256XXN_FAST_READ_WRITE_WAIT_CYCLES;
-
-	/* OSPI xip configuration */
-	ospi_psram_xip_init(config->regs, &aps512xxn_xip_cfg, config->dual_octal);
-
-	aes_enable_xip(config->aes_regs);
-
-	return 0;
+	return ret;
 }
 
 static void OSPI_IRQHandler(const struct device *dev)

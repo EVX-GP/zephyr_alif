@@ -8,6 +8,7 @@
 #define __FLASH_OSPI_IS25WX_H__
 
 #include <zephyr/device.h>
+#include <stdbool.h>
 #include <ospi_hal.h>
 
 #define MAX_SEM_TIMEOUT   100
@@ -74,10 +75,15 @@ struct alif_flash_ospi_config {
 struct alif_flash_ospi_dev_data {
 	HAL_OSPI_Handle_T ospi_handle; /* HAL Handler*/
 	uint8_t ISSI_Flags;            /* Flash Init Status*/
+	bool deep_power_down;          /* Flash is in Deep Power-down */
 	struct k_sem sem;              /* Semaphore */
 	struct k_event event_f;        /* Event */
 	struct ospi_trans_config trans_conf;  /* Transfer Configs */
 	uint32_t cmd_buf[OSPI_FLASH_CMD_BUF]; /* CMD + DATA Buffer */
 };
+
+int alif_flash_ospi_enter_dpd(const struct device *dev);
+int alif_flash_ospi_exit_dpd(const struct device *dev);
+bool alif_flash_ospi_is_in_dpd(const struct device *dev);
 
 #endif /* __FLASH_ALIF_OSPI_H__ */
