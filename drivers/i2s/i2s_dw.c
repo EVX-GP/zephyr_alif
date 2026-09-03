@@ -15,7 +15,6 @@
 #include "alif_i2s_clk_config.h"
 #include "i2s_dw.h"
 
-#define WSS_LEN			2
 #define EXT_CLK_SRC_ENABLE	0
 #define TX_FIFO_TRG_LVL		8
 #define RX_FIFO_TRG_LVL		8
@@ -74,29 +73,52 @@ struct i2s_dw_data {
 #define I2S_CLK_DIVISOR_MAX		0x3FF
 #define I2S_CLK_DIVISOR_MIN		2
 
+static int i2s_word_size_to_wss(uint8_t word_size, I2S_WSS_Type *wss_len)
+{
+	switch (word_size) {
+	case 12U:
+	case 16U:
+		*wss_len = WSS_CLOCK_CYCLES_16;
+		return 0;
+	case 20U:
+	case 24U:
+		*wss_len = WSS_CLOCK_CYCLES_24;
+		return 0;
+	case 32U:
+		*wss_len = WSS_CLOCK_CYCLES_32;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
 static int32_t i2s_configure_clocksource(bool enable,
 					const struct i2s_dw_cfg *i2s,
-					uint32_t sample_rate)
+					uint32_t sample_rate,
+					I2S_WSS_Type wss_len)
 {
 	uint32_t div = 0;
-	uint32_t sclk = 0;
+	uint64_t sclk = 0;
 	const uint32_t clock_cycles[WSS_CLOCK_CYCLES_MAX] = {16, 24, 32};
 
 	if (enable) {
-		if (!sample_rate) {
-			return -1;
+		if (!sample_rate || wss_len >= WSS_CLOCK_CYCLES_MAX) {
+			return -EINVAL;
 		}
 
-		/* Calculate sclk = 2* WSS * Sample Rate*/
-		/* WSS = 32 */
-		sclk = 2 * clock_cycles[i2s->cfg.wss_len] * (sample_rate);
+		/* Calculate SCK = 2 * clocks-per-half-frame * sample rate. */
+		sclk = 2ULL * clock_cycles[wss_len] * sample_rate;
 
 		div = i2s->cfg.clk_source/sclk;
-		if ((div > I2S_CLK_DIVISOR_MAX) || (div < I2S_CLK_DIVISOR_MIN)) {
-			return -1;
+		if ((div > I2S_CLK_DIVISOR_MAX) ||
+		    (div < I2S_CLK_DIVISOR_MIN)) {
+			return -EINVAL;
 		}
 
 		set_i2s_clock_divisor(i2s->instance, div);
+		LOG_DBG("I2S%u: %u-bit slots, frame clock %u Hz, SCK %llu Hz, divisor %u",
+			i2s->instance, clock_cycles[wss_len], sample_rate,
+			(unsigned long long)sclk, div);
 	}
 
 	return 0;
@@ -169,7 +191,7 @@ static void i2s_enable_clock(const struct device *dev)
 	i2s_global_enable(i2s);
 
 	/* Enable Master Clock */
-	i2s_configure_clock(i2s);
+	i2s_configure_clock(i2s, WSS_CLOCK_CYCLES_32);
 	i2s_clock_enable(i2s);
 }
 
@@ -696,7 +718,13 @@ static int i2s_dw_initialize(const struct device *dev)
 static int rx_stream_start(struct stream *stream, const struct device *dev)
 {
 	const struct i2s_dw_cfg *i2s = dev->config;
+	I2S_WSS_Type wss_len;
 	int ret;
+
+	ret = i2s_word_size_to_wss(stream->cfg.word_size, &wss_len);
+	if (ret < 0) {
+		return ret;
+	}
 
 	ret = k_mem_slab_alloc(stream->cfg.mem_slab, &stream->mem_block,
 			       K_NO_WAIT);
@@ -705,14 +733,20 @@ static int rx_stream_start(struct stream *stream, const struct device *dev)
 	}
 
 	/* Configure the I2S Peripheral Clock */
-	i2s_configure_clocksource(true, i2s, stream->cfg.frame_clk_freq);
+	ret = i2s_configure_clocksource(true, i2s,
+					stream->cfg.frame_clk_freq, wss_len);
+	if (ret < 0) {
+		k_mem_slab_free(stream->cfg.mem_slab, stream->mem_block);
+		stream->mem_block = NULL;
+		return ret;
+	}
 
 	/* Reset the Rx FIFO */
 	i2s_rx_fifo_reset(i2s);
 	/* Set WLEN */
 	i2s_rx_config_wlen(i2s, stream->cfg.word_size);
 	/* Enable Master Clock */
-	i2s_configure_clock(i2s);
+	i2s_configure_clock(i2s, wss_len);
 	i2s_clock_enable(i2s);
 	/* Disable Tx Channel */
 	i2s_tx_channel_disable(i2s);
@@ -734,7 +768,19 @@ static int rx_stream_start(struct stream *stream, const struct device *dev)
 static int tx_stream_start(struct stream *stream, const struct device *dev)
 {
 	const struct i2s_dw_cfg *i2s = dev->config;
+	I2S_WSS_Type wss_len;
 	int ret;
+
+	ret = i2s_word_size_to_wss(stream->cfg.word_size, &wss_len);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = i2s_configure_clocksource(true, i2s,
+					stream->cfg.frame_clk_freq, wss_len);
+	if (ret < 0) {
+		return ret;
+	}
 
 	ret = queue_get(&stream->mem_block_queue, &stream->mem_block,
 			&stream->mem_block_size);
@@ -745,9 +791,6 @@ static int tx_stream_start(struct stream *stream, const struct device *dev)
 
 	stream->mem_block_offset = 0;
 
-	/* Configure the I2S Peripheral Clock */
-	i2s_configure_clocksource(true, i2s, stream->cfg.frame_clk_freq);
-
 	/* Reset the Tx FIFO */
 	i2s_tx_fifo_reset(i2s);
 
@@ -755,7 +798,7 @@ static int tx_stream_start(struct stream *stream, const struct device *dev)
 	i2s_tx_config_wlen(i2s, stream->cfg.word_size);
 
 	/* Enable Master Clock */
-	i2s_configure_clock(i2s);
+	i2s_configure_clock(i2s, wss_len);
 	i2s_clock_enable(i2s);
 
 	/* Disable Rx Channel */
@@ -853,7 +896,6 @@ IF_ENABLED(DT_INST_NODE_HAS_PROP(index, pinctrl_0),			\
 									\
 static const struct i2s_dw_cfg i2s_dw_config_##index = {		\
 	.cfg.clk_source = DT_PROP(DT_DRV_INST(index), clock_frequency),	\
-	.cfg.wss_len = WSS_LEN,						\
 	.cfg.ext_clk_src_enable =					\
 		DT_PROP(DT_DRV_INST(index), ext_clk_src_enable) ? 1:0,	\
 	.cfg.tx_fifo_trg_lvl = TX_FIFO_TRG_LVL,		\

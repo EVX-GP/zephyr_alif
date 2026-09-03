@@ -388,10 +388,12 @@ __STATIC_INLINE void i2s_clock_disable(const struct i2s_dw_cfg *i2s)
  *                    Should be called with Clock disabled.
  * \param[in]   i2s   Pointer to I2S resources
  */
-__STATIC_INLINE void i2s_configure_clock(const struct i2s_dw_cfg *i2s)
+__STATIC_INLINE void i2s_configure_clock(const struct i2s_dw_cfg *i2s,
+					 I2S_WSS_Type wss_len)
 {
 	i2s->paddr->CCR =
-		_VAL2FLD(I2S_CCR_SCLKG, i2s->cfg.sclkg) | _VAL2FLD(I2S_CCR_WSS, i2s->cfg.wss_len);
+		_VAL2FLD(I2S_CCR_SCLKG, i2s->cfg.sclkg) |
+		_VAL2FLD(I2S_CCR_WSS, wss_len);
 }
 
 /**
