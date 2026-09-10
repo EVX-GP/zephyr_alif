@@ -124,6 +124,8 @@ struct video_cam_config {
 	const struct device *endpoint_dev;
 };
 
+#include "video_alif_triggered_private.h"
+
 struct video_cam_data {
 	DEVICE_MMIO_RAM;
 
@@ -140,6 +142,7 @@ struct video_cam_data {
 	struct k_poll_signal *signal;
 	struct video_format current_format;
 	bool is_streaming;
+	struct alif_cpi_triggered_data triggered;
 };
 
 #endif /* _VIDEO_ALIF_H_ */

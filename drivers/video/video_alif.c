@@ -407,9 +407,34 @@ static void alif_isr_cb_work(struct k_work *work)
 	alif_cam_work_helper(data->dev);
 }
 
+#include "video_alif_triggered.inc"
+
+static int alif_cam_legacy_quiesce(const struct device *dev)
+{
+	struct video_cam_data *data = dev->data;
+	uintptr_t regs = DEVICE_MMIO_GET(dev);
+	struct k_work_sync sync;
+	sys_write32(0, regs + CAM_INTR_ENA);
+	sys_write32(0, regs + CAM_CTRL);
+	(void)k_work_cancel_sync(&data->cb_work, &sync);
+	/* A callback already running when cancellation began may have rearmed. */
+	sys_write32(0, regs + CAM_CTRL);
+	for (unsigned int i = 0; i < 20 && (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY); ++i) {
+		k_msleep(1);
+	}
+	if (sys_read32(regs + CAM_CTRL) & CAM_CTRL_BUSY) {
+		data->triggered.stats.quarantined = 1;
+		return -ETIMEDOUT;
+	}
+	return data->triggered.stats.quarantined ? -EIO : 0;
+}
+
 static int alif_cam_set_fmt(const struct device *dev, enum video_endpoint_id ep,
 		       struct video_format *fmt)
 {
+	struct video_cam_data *capture = dev->data;
+	if (capture->is_streaming || capture->triggered.stats.quarantined) { return -EBUSY; }
+
 	const struct video_cam_config *config = dev->config;
 	int bits_pp = pix_fmt_bpp(fmt->pixelformat);
 	struct video_cam_data *data = dev->data;
@@ -455,6 +480,9 @@ static int alif_cam_set_fmt(const struct device *dev, enum video_endpoint_id ep,
 static int alif_cam_get_fmt(const struct device *dev, enum video_endpoint_id ep,
 		       struct video_format *fmt)
 {
+	struct video_cam_data *capture = dev->data;
+	if (capture->triggered.config.period_us) { *fmt = capture->current_format; return 0; }
+
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 	int ret;
@@ -491,6 +519,10 @@ static int alif_cam_get_fmt(const struct device *dev, enum video_endpoint_id ep,
 
 static int alif_cam_stream_start(const struct device *dev)
 {
+	struct video_cam_data *capture = dev->data;
+	if (capture->triggered.config.period_us) { return triggered_start(dev); }
+	if (capture->triggered.stats.quarantined) { return -EIO; }
+
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);
@@ -542,6 +574,11 @@ static int alif_cam_stream_start(const struct device *dev)
 
 static int alif_cam_stream_stop(const struct device *dev)
 {
+	struct video_cam_data *capture = dev->data;
+	if (capture->triggered.config.period_us) { return triggered_stop(dev); }
+	int quiet_ret = alif_cam_legacy_quiesce(dev);
+	if (quiet_ret) { return quiet_ret; }
+
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);
@@ -595,6 +632,11 @@ static int alif_cam_set_stream(const struct device *dev, bool enable)
 
 static int alif_cam_flush(const struct device *dev, enum video_endpoint_id ep, bool cancel)
 {
+	struct video_cam_data *capture = dev->data;
+	if (ep != VIDEO_EP_OUT) { return -EINVAL; }
+	if (capture->triggered.config.period_us) { return triggered_flush(dev, cancel); }
+	if (cancel) { int quiet_ret = alif_cam_legacy_quiesce(dev); if (quiet_ret) { return quiet_ret; } }
+
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);
 	struct video_buffer *vbuf = NULL;
@@ -653,6 +695,11 @@ static int alif_cam_flush(const struct device *dev, enum video_endpoint_id ep, b
 static int alif_cam_enqueue(const struct device *dev, enum video_endpoint_id ep,
 		       struct video_buffer *buf)
 {
+	struct video_cam_data *capture = dev->data;
+	if (ep != VIDEO_EP_OUT) { return -EINVAL; }
+	if (capture->triggered.config.period_us) { return triggered_enqueue(dev, buf); }
+	if (capture->triggered.stats.quarantined) { return -EIO; }
+
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 	struct video_buffer *tmp_buf = NULL;
@@ -693,6 +740,10 @@ static int alif_cam_enqueue(const struct device *dev, enum video_endpoint_id ep,
 static int alif_cam_dequeue(const struct device *dev, enum video_endpoint_id ep,
 		       struct video_buffer **buf, k_timeout_t timeout)
 {
+	struct video_cam_data *capture = dev->data;
+	if (ep != VIDEO_EP_OUT) { return -EINVAL; }
+	if (capture->triggered.config.period_us) { return triggered_dequeue(dev, buf, timeout); }
+
 	const struct video_cam_config *config = dev->config;
 	struct video_cam_data *data = dev->data;
 
@@ -719,6 +770,8 @@ static int alif_cam_dequeue(const struct device *dev, enum video_endpoint_id ep,
 
 static int alif_cam_set_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
+	if (cid == VIDEO_CID_ALIF_CPI_TRIGGERED) { return triggered_set_config(dev, value); }
+
 	const struct video_cam_config *config = dev->config;
 	int ret = -ENOTSUP;
 
@@ -732,6 +785,10 @@ static int alif_cam_set_ctrl(const struct device *dev, unsigned int cid, void *v
 
 static int alif_cam_get_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
+	if (!value) { return -EINVAL; }
+	if (cid == VIDEO_CID_ALIF_CPI_STATS) { return triggered_get_stats(dev, value); }
+	if (cid == VIDEO_CID_ALIF_CPI_FRAME) { return triggered_get_frame(dev, value); }
+
 	const struct video_cam_config *config = dev->config;
 
 	return video_get_ctrl(config->endpoint_dev, cid, value);
@@ -786,6 +843,9 @@ static DEVICE_API(video, cam_driver_api) = {
 
 static void alif_video_cam_isr(const struct device *dev)
 {
+	struct video_cam_data *capture = dev->data;
+	if (capture->triggered.config.period_us) { triggered_isr(dev); return; }
+
 	static bool is_not_corrupted_frame = true;
 	struct video_cam_data *data = dev->data;
 	uintptr_t regs = DEVICE_MMIO_GET(dev);

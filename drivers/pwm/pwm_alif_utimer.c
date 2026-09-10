@@ -35,9 +35,9 @@ struct pwm_alif_utimer_data {
 	DEVICE_MMIO_NAMED_RAM(global);
 	DEVICE_MMIO_NAMED_RAM(timer);
 	uint32_t prev_period;
-	uint32_t prev_pulse;
+	uint32_t prev_pulse[NUM_CHANNELS];
 	uint32_t frequency;
-	pwm_flags_t prev_flags;
+	pwm_flags_t prev_flags[NUM_CHANNELS];
 };
 
 #define DEV_CFG(_dev) ((const struct pwm_alif_utimer_config *)(_dev)->config)
@@ -95,7 +95,7 @@ static int pwm_alif_utimer_set_cycles(const struct device *dev, uint32_t channel
 	uintptr_t global_base = DEVICE_MMIO_NAMED_GET(dev, global);
 	uint32_t value;
 
-	if (channel > NUM_CHANNELS) {
+	if (channel >= NUM_CHANNELS) {
 		LOG_ERR("Invalid channel number");
 		return -EINVAL;
 	}
@@ -116,11 +116,11 @@ static int pwm_alif_utimer_set_cycles(const struct device *dev, uint32_t channel
 		return 0;
 	}
 
-	if (flags != data->prev_flags) {
+	if (flags != data->prev_flags[channel]) {
 		value = utimer_get_driver_config(cfg->counterdirection, flags);
 		alif_utimer_config_driver_output(timer_base, channel, value);
 
-		data->prev_flags = flags;
+		data->prev_flags[channel] = flags;
 	}
 
 	/* update period value if it as been changed */
@@ -132,11 +132,11 @@ static int pwm_alif_utimer_set_cycles(const struct device *dev, uint32_t channel
 	}
 
 	/* update pulse value if it as been changed */
-	if (pulse_cycles != data->prev_pulse) {
+	if (pulse_cycles != data->prev_pulse[channel]) {
 		/* set pulse value */
 		alif_utimer_set_compare_value(timer_base, channel, pulse_cycles);
 
-		data->prev_pulse = pulse_cycles;
+		data->prev_pulse[channel] = pulse_cycles;
 	}
 
 	/* enable channel if not enabled */
@@ -223,7 +223,9 @@ static int pwm_alif_utimer_init(const struct device *dev)
 	/* enable timer counter */
 	alif_utimer_enable_counter(timer_base);
 
-	data->prev_flags = PWM_POLARITY_NORMAL;
+	for (uint32_t channel = 0; channel < NUM_CHANNELS; ++channel) {
+		data->prev_flags[channel] = PWM_POLARITY_NORMAL;
+	}
 
 	return 0;
 }

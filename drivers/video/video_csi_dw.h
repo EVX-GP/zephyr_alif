@@ -355,6 +355,8 @@ struct timings {
 	uint16_t hact;
 };
 
+#include <zephyr/drivers/video/video_alif_triggered.h>
+
 struct csi2_dw_data {
 	DEVICE_MMIO_RAM;
 
@@ -362,6 +364,7 @@ struct csi2_dw_data {
 
 	uint32_t sensors_map;
 	uint32_t streaming_map;
+	struct alif_csi_health health;
 	struct timings time[CSI2_NUM_SENSORS];
 
 	const struct cpi_csi2_mode_settings *csi_cpi_settings[CSI2_NUM_SENSORS];
