@@ -485,11 +485,6 @@ static int alif_clock_control_set_rate(const struct device *dev,
 		return ret;
 	}
 
-	/* check if current frequency is already same as desired frequency */
-	if (curr_freq == frequency) {
-		return 0;
-	}
-
 	clk_freq = alif_get_input_clock(clk_id);
 
 	ret = alif_get_module_base(dev, ALIF_CLOCK_CFG_MODULE(clk_id),
@@ -525,6 +520,11 @@ static int alif_clock_control_set_rate(const struct device *dev,
 	if (freq_div > div_mask) {
 		LOG_ERR("ERROR: Frequency setting is not supported\n");
 		return -ENOTSUP;
+	}
+
+	/* Validate divider limits before accepting an already-selected rate. */
+	if (curr_freq == frequency) {
+		return 0;
 	}
 
 	alif_set_clock_divisor((mem_addr_t) reg_addr, div_mask, div_pos, freq_div);
