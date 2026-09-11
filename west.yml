@@ -149,7 +149,7 @@ manifest:
       groups:
         - hal
     - name: hal_alif
-      revision: b57505b362430896205d35573cfce4aa628921fd
+      revision: 89ee0aa748134dc31fcc8d3a266d7bb4d3fd3b53
       path: modules/hal/alif
       remote: alif
       groups:
@@ -186,7 +186,7 @@ manifest:
       groups:
         - hal
     - name: hal_infineon
-      revision: 468e955eb49b8a731474ff194ca17b6e6a08c2d9
+      revision: 470f874ce432763a2b82cd322d0ff6efc89240cd
       path: modules/hal/infineon
       groups:
         - hal

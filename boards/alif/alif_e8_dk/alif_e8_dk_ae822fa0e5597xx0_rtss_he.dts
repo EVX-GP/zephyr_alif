@@ -8,6 +8,7 @@
 #include <alif/ensemble/e8/ae822fa0e5597xx0.dtsi>
 #include <alif/ensemble/common/ensemble_rtss_he.dtsi>
 #include "../common/ensemble-e4-e6-e8-pinctrl.dtsi"
+#include "../common/alif-sd-vsel.dtsi"
 
 / {
 	compatible = "arm,alif-e8-dk-ae822fa0e5597xx0-rtss-he";
@@ -62,24 +63,37 @@
 	status = "okay";
 };
 
-&ospi_flash{
-	compatible = "issi,xspi-flash-controller";
-	reg = <0x0>;
-	erase-value = <0xff>;
-	num-of-sector = <32768>;
-	page-size = <4096>;
-	sector-size = <4096>;
-	write-block-size = <1>;
+&ospi0 {
+	aps512xxn: aps512xxn {
+		compatible = "alif,apmemory-aps512xxn";
+		size = <DT_SIZE_M(64)>;
+		latency-code = <4>;
+		status = "disabled";
+	};
+};
 
-	/* Flash Size 128MB */
-	#address-cells = <1>;
-	#size-cells = <1>;
+&ospi1 {
+	/* External Flash on OSPI */
+	ospi_flash: ospi_flash@0 {
+		compatible = "issi,xspi-flash-controller";
+		reg = <0x0>;
+		erase-value = <0xff>;
+		num-of-sector = <32768>;
+		page-size = <4096>;
+		sector-size = <4096>;
+		write-block-size = <2>;
 
-	flash_storage: flash_storage@0 {
-		compatible = "soc-nv-flash";
-		reg = <0x0 DT_SIZE_M(128)>;
-		erase-block-size = <DT_SIZE_K(4)>;
-		write-block-size = <1>;
+		/* Flash Size 128MB */
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		flash_storage: flash_storage@0 {
+			compatible = "soc-nv-flash";
+			reg = <0x0 DT_SIZE_M(128)>;
+			erase-block-size = <DT_SIZE_K(4)>;
+			write-block-size = <2>;
+		};
+		status = "disabled";
 	};
 };
 
@@ -90,4 +104,3 @@
 &uart2 {
 	status = "okay";
 };
-

@@ -8,6 +8,7 @@
 #define DMA_PL330_H
 
 #include <zephyr/drivers/dma.h>
+#include <zephyr/drivers/clock_control.h>
 
 #define DT_DRV_COMPAT arm_dma_pl330
 /*
@@ -197,6 +198,17 @@ struct dma_pl330_ch_config {
 	/* Channel specific private data */
 	struct dma_pl330_ch_internal internal;
 	size_t loop_counter0;
+
+	/*
+	 * Scatter-gather support fields
+	 *
+	 * head_block: Pointer to the first block in the scatter-gather chain
+	 * current_block: Pointer to the block currently being transferred
+	 */
+	struct dma_block_config *head_block;
+	struct dma_block_config *current_block;
+	/* Copy of the caller's block chain */
+	struct dma_block_config block_pool[CONFIG_DMA_PL330_MAX_BLOCK_COUNT];
 };
 
 struct dma_pl330_config {
@@ -209,6 +221,8 @@ struct dma_pl330_config {
 
 	uint8_t num_irqs;
 	void (*irq_configure)(const struct device *dev);
+	const struct device *clk_dev;
+	clock_control_subsys_t clk_subsys;
 };
 
 struct dma_pl330_dev_data {
@@ -216,6 +230,7 @@ struct dma_pl330_dev_data {
 	int event_irq[DMA_MAX_EVENTS];
 	uint8_t num_periph_req;
 	uint8_t axi_data_width;
+	struct k_spinlock lock;
 };
 
 #endif

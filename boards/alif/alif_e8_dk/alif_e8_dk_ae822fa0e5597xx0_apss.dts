@@ -17,9 +17,10 @@
 	#size-cells = <1>;
 
 	chosen {
+		zephyr,flash = &mram0;
 		zephyr,sram = &sram0;
-		zephyr,console = &uart4;
-		zephyr,shell-uart = &uart4;
+		zephyr,console = &uart2;
+		zephyr,shell-uart = &uart2;
 	};
 
 	cpus {
@@ -49,6 +50,12 @@
 			status = "okay";
 		};
 
+		mram0: mram@80100000 {
+			compatible = "zephyr,memory-region";
+			reg = <0x80100000 DT_SIZE_K(4608)>;
+			zephyr,memory-region = "MRAM";
+		};
+
 		sram0: sram@2000000 {
 			compatible = "mmio-sram";
 			reg = <0x2000000 0x400000>;
@@ -66,15 +73,17 @@
 			status = "okay";
 		};
 
-		clockctrl: clock-controller@4903f000 {
+		clockctrl: clock-controller@1a602000 {
 			compatible = "alif,clockctrl";
-			reg = <0x4903F000 0xB0
+			reg = <0x1A602000 0x2C
+				0x4903F000 0xB0
 				0x4902F000 0xBC
 				0x1A604000 0x44
 				0x1A609000 0x14
 				0x43007000 0x2C
 				0x400F0000 0x14>;
-			reg-names = "clkctl_per_mst",
+			reg-names = "cgu",
+				    "clkctl_per_mst",
 				    "clkctl_per_slv",
 				    "aon",
 				    "vbat",
@@ -182,7 +191,7 @@
 			pinctrl-0 = <&pinctrl_uart2>;
 			pinctrl-names = "default";
 			fifo-size = <32>;
-			status = "disabled";
+			status = "okay";
 		};
 
 		uart3: uart@4901b000 {
@@ -208,7 +217,7 @@
 			fifo-size = <32>;
 			pinctrl-0 = <&pinctrl_uart4>;
 			pinctrl-names = "default";
-			status = "okay";
+			status = "disabled";
 		};
 
 		uart5: uart@4901d000 {

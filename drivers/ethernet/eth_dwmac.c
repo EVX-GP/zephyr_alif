@@ -532,8 +532,14 @@ static int dwmac_set_config(const struct device *dev,
 
 static void dwmac_iface_init(struct net_if *iface)
 {
-	struct dwmac_priv *p = net_if_get_device(iface)->data;
+	const struct device *dev = net_if_get_device(iface);
+	struct dwmac_priv *p = dev->data;
 	uint32_t reg_val;
+
+	if (!device_is_ready(dev)) {
+		LOG_ERR("device not ready (probe failed), skipping iface init");
+		return;
+	}
 
 	__ASSERT(!p->iface, "interface already initialized?");
 	p->iface = iface;
@@ -569,6 +575,11 @@ static void dwmac_iface_init(struct net_if *iface)
 	reg_val = REG_READ(MAC_CONF);
 	reg_val |= MAC_CONF_CST | MAC_CONF_TE | MAC_CONF_RE;
 	REG_WRITE(MAC_CONF, reg_val);
+
+	if (IS_ENABLED(CONFIG_ETH_DWMAC_PASS_ALL_MULTICAST)) {
+		reg_val = REG_READ(MAC_PKT_FILTER);
+		REG_WRITE(MAC_PKT_FILTER, reg_val | MAC_PKT_FILTER_PM);
+	}
 
 	/* unmask IRQs */
 	REG_WRITE(DMA_CHn_IRQ_ENABLE(0),

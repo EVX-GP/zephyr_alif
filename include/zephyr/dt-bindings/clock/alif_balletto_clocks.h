@@ -141,9 +141,9 @@
 	ALIF_CLK_CFG(CLKCTL_PER_SLV, OSPI_CTRL, 0U, 1U, 0U, 0U, 0U)
 
 /* I2C clocks */
-#define ALIF_I2C0_CLK               \
+#define ALIF_I2C0_GATED_CLK               \
 	ALIF_CLK_CFG(CLKCTL_PER_SLV, I2C0_CTRL, 0U, 1U, 0U, 0U, 0U)
-#define ALIF_I2C1_CLK               \
+#define ALIF_I2C1_GATED_CLK               \
 	ALIF_CLK_CFG(CLKCTL_PER_SLV, I2C1_CTRL, 0U, 1U, 0U, 0U, 0U)
 
 /* GPIO Debounce clocks */
@@ -202,7 +202,14 @@
 #define ALIF_DMA2_CLK               \
 	ALIF_CLK_CFG(M55HE_CFG, HE_CLK_ENA, 4U, 1U, 0U, 0U, 0U)
 
+/* AHI & HCI clock */
+#define ALIF_HCI_AHI_CLK            \
+	ALIF_CLK_CFG(M55HE_CFG, HE_CLK_ENA, 4U, 1U, 0U, 0U, 0U)
+
 /* UTIMER clocks */
-#define ALIF_UTIMER_CLK             ALIF_CLK(1U)
+#define ALIF_UTIMER_CLK         ALIF_CLK(1U)
+
+/* SPI Clock */
+#define ALIF_SPI_CLK		ALIF_CLK(2)
 
 #endif /* ZEPHYR_INCLUDE_ZEPHYR_DT_BINDINGS_CLOCK_ALIF_BALLETTO_CLOCKS_H_ */

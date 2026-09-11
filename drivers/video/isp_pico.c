@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 Alif Semiconductor.
+ * Copyright (C) 2026 Alif Semiconductor.
  * SPDX-License-Identifier: Apache-2.0
  */
 #define DT_DRV_COMPAT vsi_isp_pico
@@ -16,8 +16,9 @@ LOG_MODULE_REGISTER(ISP, CONFIG_VIDEO_LOG_LEVEL);
 #include "isp_pico.h"
 #include <zephyr/drivers/video/video_alif.h>
 #include <soc_memory_map.h>
+#include <zephyr/cache.h>
 
-#define WORKQ_STACK_SIZE 1024
+#define WORKQ_STACK_SIZE 4096
 #define WORKQ_PRIORITY   7
 K_KERNEL_STACK_DEFINE(isp_cb_workq, WORKQ_STACK_SIZE);
 
@@ -98,27 +99,27 @@ static const struct video_format_cap supported_tpg_fmts[] = {
 };
 
 static const struct video_format_cap supported_output_fmts[] = {
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR8, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG8, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG8, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB8, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR10, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG10, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG10, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB10, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_NV12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_NV16, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUV422P, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUV420, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUYV, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GREY, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_Y10, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_Y12, 640, 480),
-	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGB888_PLANAR_PRIVATE, 640, 480),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR8, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG8, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG8, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB8, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR10, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG10, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG10, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB10, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_BGGR12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GBRG12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GRBG12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGGB12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_NV12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_NV16, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUV422P, 19200, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUV420, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_YUYV, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_GREY, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_Y10, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_Y12, 1920, 1080),
+	ISP_VIDEO_FORMAT_CAP(VIDEO_PIX_FMT_RGB888_PLANAR_PRIVATE, 1920, 1080),
 	{ 0 },
 };
 
@@ -169,15 +170,18 @@ static int isp_attach_buffer_to_hw(const struct device *dev, struct video_buffer
 	}
 
 	for (i = 0; i < num_planes; i++) {
-		size_plane = fourcc_to_plane_size(channel->output_fmt.pixelformat,
-				i, vbuf->size);
-		if (size_plane == 0 || size_plane > vbuf->size) {
-			LOG_ERR("Unsupported format!");
-			return -ENOTSUP;
-		}
+		if (!i) {
+			planes[i] = POINTER_TO_UINT(local_to_global(vbuf->buffer));
+		} else {
+			size_plane = fourcc_to_plane_size(channel->output_fmt.pixelformat,
+					i - 1, vbuf->size);
+			if (size_plane == 0 || size_plane > vbuf->size) {
+				LOG_ERR("Unsupported format!");
+				return -ENOTSUP;
+			}
 
-		planes[i] = (i) ? (planes[i-1] + size_plane) :
-			POINTER_TO_UINT(local_to_global(vbuf->buffer));
+			planes[i] = (planes[i-1] + size_plane);
+		}
 	}
 
 	LOG_DBG("planes: 0x%08x 0x%08x 0x%08x", planes[0], planes[1], planes[2]);
@@ -205,7 +209,7 @@ static void isp_bottom_half(const struct device *dev)
 	int ret;
 
 	/* Do bottom half processing of all the modules at the end of frame. */
-	isp_vsi_bottom_half(&data->init_cfg, data->mi_mis);
+	isp_vsi_bottom_half(dev, &data->init_cfg, data->mi_mis);
 
 
 	vbuf = k_fifo_peek_head(&data->fifo_in);
@@ -533,6 +537,11 @@ static int isp_stream_start(const struct device *dev)
 	uint32_t tmp;
 	int ret;
 
+	/* Cancel any stale work from previous session before starting */
+	struct k_work_sync sync;
+
+	k_work_cancel_sync(&data->cb_work, &sync);
+
 	if (data->is_streaming) {
 		LOG_DBG("Already streaming");
 		return -EBUSY;
@@ -542,7 +551,7 @@ static int isp_stream_start(const struct device *dev)
 	if (vbuf == NULL) {
 		LOG_ERR("Unexpected condition! Empty IN-FIFO. Can't start streaming!");
 		data->is_streaming = false;
-		return -ENODEV;
+		return -ENOBUFS;
 	}
 
 	data->curr_vid_buf = POINTER_TO_UINT(vbuf->buffer);
@@ -608,9 +617,15 @@ static int isp_stream_start(const struct device *dev)
 		return ret;
 	}
 
+	/* Set is_streaming BEFORE starting hardware to prevent
+	 * bottom_half from stopping CPI mid-start
+	 */
+	data->is_streaming = true;
+
 	ret = isp_vsi_start(&data->init_cfg);
 	if (ret) {
 		LOG_ERR("Failed to start stream!");
+		data->is_streaming = false;
 		goto dequeue_buf;
 	}
 
@@ -618,10 +633,10 @@ static int isp_stream_start(const struct device *dev)
 	if (ret) {
 		LOG_ERR("Failed to start stream for Endpoint device: %s!",
 				config->controller->name);
+		data->is_streaming = false;
 		goto stop_isp_stream;
 	}
 
-	data->is_streaming = true;
 	return 0;
 
 stop_isp_stream:
@@ -778,10 +793,7 @@ static int isp_enqueue(const struct device *dev, enum video_endpoint_id ep,
 		       struct video_buffer *buf)
 {
 	struct isp_data *data = dev->data;
-	uint32_t to_read;
 	uint32_t tmp;
-
-	struct channel_parameters *channel = &data->init_cfg.channel;
 
 	if (ep != VIDEO_EP_OUT && ep != VIDEO_EP_ALL) {
 		return -EINVAL;
@@ -795,13 +807,14 @@ static int isp_enqueue(const struct device *dev, enum video_endpoint_id ep,
 		return -ENOBUFS;
 	}
 
-	to_read = channel->output_fmt.pitch * channel->output_fmt.height;
 	buf->bytesused = 0;
 
 	k_fifo_put(&data->fifo_in, buf);
 
 	LOG_DBG("Enqueued buffer: Addr - 0x%x, size - %d, bytesused - %d",
 		(uint32_t)buf->buffer, buf->size, buf->bytesused);
+
+	(void)sys_cache_data_flush_and_invd_range(buf->buffer, buf->size);
 
 	return 0;
 }
@@ -831,21 +844,29 @@ static int isp_dequeue(const struct device *dev, enum video_endpoint_id ep,
 static int isp_set_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
 	const struct isp_config *config = dev->config;
-	int ret = -ENOTSUP;
+	struct isp_data *data = dev->data;
 
-	ret = video_set_ctrl(config->controller, cid, value);
-	if (ret) {
-		return ret;
+	switch (cid) {
+	case VIDEO_CID_ALIF_ISP_SET:
+		return isp_vsi_set_param(&data->init_cfg,
+					 (const struct isp_params *)value);
+	default:
+		return video_set_ctrl(config->controller, cid, value);
 	}
-
-	return 0;
 }
 
 static int isp_get_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
 	const struct isp_config *config = dev->config;
+	struct isp_data *data = dev->data;
 
-	return video_get_ctrl(config->controller, cid, value);
+	switch (cid) {
+	case VIDEO_CID_ALIF_ISP_GET:
+		return isp_vsi_get_param(&data->init_cfg,
+					 (struct isp_params *)value);
+	default:
+		return video_get_ctrl(config->controller, cid, value);
+	}
 }
 
 #ifdef CONFIG_POLL
@@ -877,6 +898,28 @@ static DEVICE_API(video, isp_driver_api) = {
 	.set_signal = isp_set_signal,
 #endif /* CONFIG_POLL */
 };
+
+int z_impl_isp_vsi_register_ae_status_callback(const struct device *dev,
+		isp_ae_status_cb ae_status_cb, void *user_data)
+{
+	struct isp_data *data = dev->data;
+
+	data->init_cfg.ae_status_cb = ae_status_cb;
+	data->init_cfg.ae_status_user_data = user_data;
+
+	return 0;
+}
+
+#ifdef CONFIG_USERSPACE
+#include <zephyr/internal/syscall_handler.h>
+static int z_vrfy_isp_vsi_register_ae_status_callback(const struct device *dev,
+		isp_ae_status_cb ae_status_cb, void *user_data)
+{
+	K_OOPS(K_SYSCALL_SPECIFIC_DRIVER(dev, K_OBJ_DRIVER_VIDEO, &isp_driver_api));
+	return z_impl_isp_vsi_register_ae_status_callback(dev, ae_status_cb, user_data);
+}
+#include <zephyr/syscalls/register_ae_status_callback_mrsh.c>
+#endif /* CONFIG_USERSPACE */
 
 static int isp_configure(const struct device *dev)
 {

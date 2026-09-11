@@ -58,7 +58,6 @@ struct clock_control_alif_config {
 #define ALIF_CLOCK_128K_CLK_FREQ      (OSC_CLOCK_SRC_FREQ(lfrc) * 4U)
 #define ALIF_CLOCK_S32K_CLK_FREQ      OSC_CLOCK_SRC_FREQ(lfxo)
 
-
 /** register offset (from clkid cell) */
 #define ALIF_CLOCK_CFG_REG(id) (((id) >> ALIF_CLOCK_REG_SHIFT) & ALIF_CLOCK_REG_MASK)
 /** enable bit (from clkid cell) */
@@ -77,6 +76,15 @@ struct clock_control_alif_config {
 /** clock module (from clkid cell) */
 #define ALIF_CLOCK_CFG_MODULE(id) (((id) >> ALIF_CLOCK_MODULE_SHIFT) & ALIF_CLOCK_MODULE_MASK)
 
+/* CLK_ENA register config */
+#define ALIF_CLK_ENA_CLK38P4M_BIT     23U
+#define ALIF_CLK_ENA_CLK20M_BIT       22U
+#define ALIF_CLK_ENA_CLK100M_BIT      21U
+#define ALIF_CLK_ENA_CLK160M_BIT      20U
+
+/* EXPMST0 control register config */
+#define ALIF_EXPMST0_CTRL_IPCLK_FORCE_BIT BIT(31U)
+#define ALIF_EXPMST0_CTRL_PCLK_FORCE_BIT  BIT(30U)
 
 static uint32_t alif_get_input_clock(uint32_t clock_name)
 {
@@ -125,11 +133,24 @@ static uint32_t alif_get_input_clock(uint32_t clock_name)
 	case ALIF_UART3_SYST_PCLK:
 	case ALIF_UART4_SYST_PCLK:
 	case ALIF_UART5_SYST_PCLK:
+	case ALIF_I2C0_GATED_CLK:
+	case ALIF_I2C1_GATED_CLK:
 		return ALIF_CLOCK_SYST_PCLK_FREQ;
+	case ALIF_UART0_38M4_CLK:
+	case ALIF_UART1_38M4_CLK:
+	case ALIF_UART2_38M4_CLK:
+	case ALIF_UART3_38M4_CLK:
+	case ALIF_UART4_38M4_CLK:
+	case ALIF_UART5_38M4_CLK:
+		return ALIF_CLOCK_HFOSC_CLK_FREQ;
 	case ALIF_LPUART_CLK:
 		return ALIF_CLOCK_SYST_CORE_FREQ;
 	case ALIF_I3C_CLK:
 		return ALIF_CLOCK_SYST_ACLK_FREQ;
+	case ALIF_LPSPI_CLK:
+		return ALIF_CLOCK_SYST_CORE_FREQ;
+	case ALIF_SPI_CLK:
+		return ALIF_CLOCK_SYST_HCLK_FREQ;
 	default:
 		return 0;
 	}
@@ -254,6 +275,33 @@ static int alif_clock_control_on(const struct device *dev,
 	if (ret) {
 		return ret;
 	}
+
+	switch (clk_id) {
+#if defined(CONFIG_UART_ASYNC_API)
+	/* Force enable pclk for UART — only when DMA enable. */
+	case ALIF_UART0_SYST_PCLK:
+	case ALIF_UART1_SYST_PCLK:
+	case ALIF_UART2_SYST_PCLK:
+	case ALIF_UART3_SYST_PCLK:
+	case ALIF_UART4_SYST_PCLK:
+	case ALIF_UART5_SYST_PCLK:
+	case ALIF_UART0_38M4_CLK:
+	case ALIF_UART1_38M4_CLK:
+	case ALIF_UART2_38M4_CLK:
+	case ALIF_UART3_38M4_CLK:
+	case ALIF_UART4_38M4_CLK:
+	case ALIF_UART5_38M4_CLK:
+		reg_addr = module_base + ALIF_EXPMST0_CTRL_REG;
+
+		sys_set_bits(reg_addr, ALIF_EXPMST0_CTRL_PCLK_FORCE_BIT);
+
+		break;
+#endif
+
+	default:
+		break;
+	}
+
 	reg_addr = module_base + ALIF_CLOCK_CFG_REG(clk_id);
 
 	sys_set_bit(reg_addr, ALIF_CLOCK_CFG_ENABLE(clk_id));
@@ -264,7 +312,7 @@ static int alif_clock_control_on(const struct device *dev,
 static int alif_clock_control_off(const struct device *dev,
 			clock_control_subsys_t sub_system)
 {
-	uint32_t clk_id = *(uint32_t *) sub_system;
+	uint32_t clk_id = (uint32_t) sub_system;
 	uint32_t module_base, reg_addr;
 	int32_t ret;
 
@@ -417,6 +465,42 @@ static inline int alif_clock_control_configure(const struct device *dev,
 	return 0;
 }
 
+static int clockctrl_init(const struct device *dev)
+{
+	uint32_t cgu_mask = 0;
+	uint32_t cgu_module_base;
+	int32_t ret;
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_38p4m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK38P4M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_20m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK20M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_100m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK100M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_160m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK160M_BIT);
+#endif
+
+	/* enable cgu clock */
+	if (cgu_mask) {
+		ret = alif_get_module_base(dev, ALIF_CGU_MODULE,
+					&cgu_module_base);
+		if (ret) {
+			return -ENODEV;
+		}
+
+		sys_set_bits(cgu_module_base + ALIF_CLK_ENA_REG, cgu_mask);
+	}
+
+	return 0;
+}
+
 static DEVICE_API(clock_control, alif_clock_control_driver_api) = {
 	.on = alif_clock_control_on,
 	.off = alif_clock_control_off,
@@ -435,6 +519,6 @@ static const struct clock_control_alif_config config = {
 	.m55he_cfg_base = DT_INST_REG_ADDR_BY_NAME(0, m55he_cfg),
 };
 
-DEVICE_DT_DEFINE(DT_NODELABEL(clockctrl), NULL, NULL, NULL, &config, PRE_KERNEL_1,
+DEVICE_DT_DEFINE(DT_NODELABEL(clockctrl), clockctrl_init, NULL, NULL, &config, PRE_KERNEL_1,
 				CONFIG_CLOCK_CONTROL_INIT_PRIORITY,
 				&alif_clock_control_driver_api);

@@ -13,6 +13,7 @@
 #include <alif/common/alif_common.dtsi>
 #include <zephyr/dt-bindings/mipi_dsi/mipi_dsi.h>
 #include <zephyr/dt-bindings/power-domain/alif_power_domain.h>
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
 
 &{/} {
 	/* Individual power domain devices - one per domain */
@@ -78,6 +79,7 @@
 	sram0: sram@2000000 {
 		compatible = "zephyr,memory-region","mmio-sram";
 		zephyr,memory-region = "SRAM0";
+		zephyr,memory-attr = <DT_MEM_ARM_MPU_RAM>;
 	};
 
 	ns: ns@20018000 {
@@ -111,15 +113,18 @@
 	};
 
 	sdhc: sdhc@48102000 {
-		compatible = "intel,emmc-host";
+		compatible = "snps,dwc-sdhc";
 		reg = <0x48102000 0xF70>;
 		interrupt-parent = <&nvic>;
-		interrupts = <102 ALIF_DEFAULT_IRQ_PRIORITY>;
-		max-bus-freq = <25000000U>;
+		interrupts = <102 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <103 ALIF_DEFAULT_IRQ_PRIORITY>;
+		interrupt-names = "sdmmc", "sdmmc_wakeup";
+		max-bus-freq = <50000000U>;
 		min-bus-freq = <400000>;
 		power-delay-ms = <500>;
 		pinctrl-0 = <&pinctrl_sdmmc>;
 		pinctrl-names = "default";
+		cd-gpios = <&gpio3 3 GPIO_ACTIVE_LOW>;
 		mmc {
 			compatible = "zephyr,sdmmc-disk";
 			bus-width = <4>;
@@ -399,11 +404,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi0 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi0_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48103000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <137 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -416,11 +422,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi1 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi1_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48104000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <138 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -433,11 +440,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi2 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi2_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48105000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <139 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -450,11 +458,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi3 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi3_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48106000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <140 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -465,19 +474,37 @@
 		compatible = "arm,dma-pl330";
 		reg = <0x49080000 0x1000>;
 		reg-names = "pl330_regs";
-		dma-channels = <4>;
+		dma-channels = <8>;
 		#dma-cells = <2>;
 		interrupt-parent = <&nvic>;
 		interrupts = <299 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <300 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <301 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <302 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <303 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <304 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <305 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <306 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <331 ALIF_DEFAULT_IRQ_PRIORITY>;
 		interrupt-names = "channel0", "channel1",
-						  "channel2", "channel3",
-						  "abort";
+				"channel2", "channel3",
+				"channel4", "channel5",
+				"channel6", "channel7",
+				"abort";
+		clocks = <&clockctrl ALIF_DMA0_CLK>;
 		status = "disabled";
 	};
+
+	evtrtr0: event-router@49035000 {
+		compatible = "alif,dma-event-router";
+		reg = <0x49035000 0x100>;
+		dma-controller = <&dma0>;
+		channels = <32>;
+		dma-groups = <4>;
+		#dma-cells = <2>;
+		status = "disabled";
+	};
+
 	timer0: timer@42001000 {
 		compatible = "snps,dw-timers";
 		reg = <0x42001000 0x14>;
@@ -1242,14 +1269,14 @@
 	crc0: crc0@48107000 {
 		compatible = "alif,alif-crc";
 		reg = <0x48107000 0x1000>;
-		crc_algo = "CRC_8_BIT_SIZE";
+		crc-algo = "crc8-ccitt";
 		status = "disabled";
 	};
 
 	crc1: crc1@48108000 {
 		compatible = "alif,alif-crc";
 		reg = <0x48108000 0x1000>;
-		crc_algo = "CRC_8_BIT_SIZE";
+		crc-algo = "crc8-ccitt";
 		status = "disabled";
 	};
 
@@ -1521,18 +1548,22 @@
 	i2c0: i2c0@49010000 {
 		compatible = "snps,designware-i2c";
 		clock-frequency = <I2C_BITRATE_STANDARD>;
+		clocks = <&clockctrl ALIF_I2C0_PCLK>;
 		/*
 		 * For Standard  speed LCNT=0 and HCNT=0
-		 * For Fast      speed LCNT=50 and HCNT=30
-		 * For Fast Plus speed LCNT=35 and HCNT=5
+		 * For Fast      speed LCNT=31 and HCNT=31
+		 * For Fast Plus speed LCNT=12 and HCNT=12
 		 */
 		hcnt-offset = <0>;
 		lcnt-offset = <0>;
+		fs-spike-len = <5>;
+		hs-spike-len = <1>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 		reg = <0x49010000 0x1000>;
-		pinctrl-0 = < &pinctrl_i2c0 >;
-		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_i2c0>;
+		pinctrl-1 = <&pinctrl_i2c0_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupt-parent = <&nvic>;
 		interrupts = <132 ALIF_DEFAULT_IRQ_PRIORITY>;
 		tx_threshold = <16>;
@@ -1543,18 +1574,22 @@
 	i2c1: i2c1@49011000 {
 		compatible = "snps,designware-i2c";
 		clock-frequency = <I2C_BITRATE_STANDARD>;
+		clocks = <&clockctrl ALIF_I2C1_PCLK>;
 		/*
 		 * For Standard  speed LCNT=0 and HCNT=0
-		 * For Fast      speed LCNT=50 and HCNT=30
-		 * For Fast Plus speed LCNT=35 and HCNT=5
+		 * For Fast      speed LCNT=31 and HCNT=31
+		 * For Fast Plus speed LCNT=12 and HCNT=12
 		 */
 		hcnt-offset = <0>;
 		lcnt-offset = <0>;
+		fs-spike-len = <5>;
+		hs-spike-len = <1>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 		reg = <0x49011000 0x1000>;
-		pinctrl-0 = < &pinctrl_i2c1 >;
-		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_i2c1>;
+		pinctrl-1 = <&pinctrl_i2c1_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupt-parent = <&nvic>;
 		interrupts = <133 ALIF_DEFAULT_IRQ_PRIORITY>;
 		tx_threshold = <16>;
@@ -1610,39 +1645,57 @@
 		status          = "disabled";
 	};
 
+	can0: can@49036000 {
+		compatible      = "cast,can";
+		reg             = <0x49036000 0x1000 0x49037000 0x1000>;
+		reg-names       = "can_reg", "can_cnt_reg";
+		interrupt-parent= <&nvic>;
+		interrupts      = <104 0>;
+		interrupt-names = "can_interrupt";
+		clocks          = <&clockctrl ALIF_CANFD0_160M_CLK>;
+		clock-frequency = <20000000>;
+		pinctrl-0       = <&pinctrl_can0>;
+		pinctrl-names   = "default";
+		can-fd;
+		can-fd-ctrl-reg	= <0x4902F00C>;
+		can-fd-bit	= <20>;
+		status          = "disabled";
+	};
+
 	i2s0: i2s0@49014000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_0";
 		reg = <0x49014000 0x1000>;
-		pinctrl-names = "default";
+		power-domains = <&pd_syst>;
 		pinctrl-0 = <&pinctrl_i2s0>;
+		pinctrl-1 = <&pinctrl_i2s0_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <141 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S0_76M8_CLK>;
 		status = "disabled";
 	};
 
 	i2s1: i2s1@49015000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_1";
 		reg = <0x49015000 0x1000>;
-		pinctrl-names = "default";
+		power-domains = <&pd_syst>;
 		pinctrl-0 = <&pinctrl_i2s1>;
+		pinctrl-1 = <&pinctrl_i2s1_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <142 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S1_76M8_CLK>;
 		status = "disabled";
 	};
 
 	i2s4: lpi2s@43001000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_4";
 		reg = <0x43001000 0x1000>;
-		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_lpi2s>;
+		pinctrl-1 = <&pinctrl_lpi2s_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <48 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_LPI2S_76M8_CLK>;
 		status = "disabled";
 	};
-
 	ospi0: ospi0@83000000 {
 		compatible = "snps,designware-ospi";
 		reg = <0x83000000 0x1000>;
@@ -1651,7 +1704,14 @@
 		interrupt-parent = <&nvic>;
 		interrupts = <96 ALIF_DEFAULT_IRQ_PRIORITY>;
 		aes-reg = <0x83001000 0x100>;
+		clocks = <&clockctrl ALIF_OSPI0_ACLK_CLK>;
+		bus-speed = <100000000>;
 		cs-pin = <0>;
+		ddr-drive-edge = <1>;
+		rx-ds-delay = <11>;
+		tx-fifo-threshold = <0>;
+		xip-wait-cycles = <255>;
+		xip-base-address = <0xA0000000 0x10000000>;
 		status = "disabled";
 	};
 
@@ -1867,6 +1927,34 @@
 			compatible = "alif,clock";
 			clock-frequency = <200000000>;
 			status = "okay";
+			#clock-cells = <0>;
+		};
+
+		clk_38p4m: clk_38p4m {
+			compatible = "fixed-clock";
+			clock-frequency = <38400000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_20m: clk_20m {
+			compatible = "fixed-clock";
+			clock-frequency = <20000000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_100m: clk_100m {
+			compatible = "fixed-clock";
+			clock-frequency = <100000000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_160m: clk_160m {
+			compatible = "fixed-clock";
+			clock-frequency = <160000000>;
+			status = "disabled";
 			#clock-cells = <0>;
 		};
 	};

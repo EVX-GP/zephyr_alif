@@ -10,6 +10,7 @@
 	sram1: sram@8000000 {
 		compatible = "zephyr,memory-region","mmio-sram";
 		zephyr,memory-region = "SRAM1";
+		zephyr,memory-attr = <DT_MEM_ARM_MPU_RAM>;
 	};
 
 	uart6: uart@4901e000 {
@@ -140,23 +141,25 @@
 
 	i2s2: i2s2@49016000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_2";
-		pinctrl-names = "default";
-		pinctrl-0 = <&pinctrl_i2s2>;
 		reg = <0x49016000 0x1000>;
+		power-domains = <&pd_syst>;
+		pinctrl-0 = <&pinctrl_i2s2>;
+		pinctrl-1 = <&pinctrl_i2s2_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <143 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S2_76M8_CLK>;
 		status = "disabled";
 	};
 
 	i2s3: i2s3@49017000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_3";
 		reg = <0x49017000 0x1000>;
-		pinctrl-names = "default";
+		power-domains = <&pd_syst>;
 		pinctrl-0 = <&pinctrl_i2s3>;
+		pinctrl-1 = <&pinctrl_i2s3_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <144 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S3_76M8_CLK>;
 		status = "disabled";
 	};
 
@@ -214,26 +217,20 @@
 		xip-wait-cycles = <16>;
 		xip-base-address = <0xC0000000 0x20000000>;
 		status = "disabled";
-
-		ospi_flash: ospi_flash@0 {
-			compatible = "issi,xspi-flash-controller";
-			reg = <0x0>;
-			erase-value = <0xff>;
-			num-of-sector = <16384>;
-			page-size = <4096>;
-			sector-size = <4096>;
-			write-block-size = <2>;
-
-			/* Flash Size 64MB */
-			#address-cells = <1>;
-			#size-cells = <1>;
-
-			flash_storage: flash_storage@0 {
-				compatible = "soc-nv-flash";
-				reg = <0x0 DT_SIZE_M(64)>;
-				erase-block-size = <DT_SIZE_K(4)>;
-				write-block-size = <2>;
-			};
-		};
 	};
+};
+
+&cmp1 {
+	clocks = <&clockctrl ALIF_CMP1_CLK>,
+		 <&clockctrl ALIF_CMP0_CLK>;
+};
+
+&cmp2 {
+	clocks = <&clockctrl ALIF_CMP2_CLK>,
+		 <&clockctrl ALIF_CMP0_CLK>;
+};
+
+&cmp3 {
+	clocks = <&clockctrl ALIF_CMP3_CLK>,
+		 <&clockctrl ALIF_CMP0_CLK>;
 };

@@ -4,14 +4,7 @@
  */
 
 #include "alif/ensemble/common/e1c.dtsi"
-
-&sram0 {
-	reg = <0x02000000 DT_SIZE_K(512)>;
-};
-
-&sram1 {
-	reg = <0x08000000 DT_SIZE_K(1536)>;
-};
+#include "alif/ensemble/common/aipm_ensemble_e1c.dtsi"
 
 &itcm {
 	reg = <0x0 DT_SIZE_K(512)>;

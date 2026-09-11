@@ -55,6 +55,9 @@ struct clock_control_alif_config {
 #define ALIF_CLOCK_USB_CLK_FREQ      (PLL_CLOCK1_SRC_FREQ / 40U)
 #define ALIF_CLOCK_160M_CLK_FREQ     (PLL_CLOCK1_SRC_FREQ / 5U)
 #define ALIF_CLOCK_10M_CLK_FREQ      (PLL_CLOCK1_SRC_FREQ / 80U)
+#if defined(CONFIG_ENSEMBLE_GEN2)
+#define ALIF_CLOCK_266M_CLK_FREQ     (PLL_CLOCK1_SRC_FREQ / 3U)
+#endif
 
 #define ALIF_CLOCK_HFOSC_CLK_FREQ    OSC_CLOCK_SRC_FREQ(hfxo)
 #define ALIF_CLOCK_76M8_CLK_FREQ     (OSC_CLOCK_SRC_FREQ(hfxo) * 2U)
@@ -66,14 +69,25 @@ struct clock_control_alif_config {
 #define ALIF_CLOCK_S32K_CLK_FREQ OSC_CLOCK_SRC_FREQ(lfrc)
 #endif
 
-#if defined(CONFIG_ENSEMBLE_GEN2)
 /* CLK_ENA register config */
-#define ALIF_CLK_ENA_CLK76P8M_BIT 24U
+#if defined(CONFIG_ENSEMBLE_GEN2)
+#define ALIF_CLK_ENA_CLK76P8M_BIT   24U
+#define ALIF_CLK_ENA_CLK10M_BIT      9U
+#endif
+
+#define ALIF_CLK_ENA_CLK38P4M_BIT   23U
+#define ALIF_CLK_ENA_CLK20M_BIT     22U
+#if defined(CONFIG_ENSEMBLE_GEN2)
+#define ALIF_CLK_ENA_CLK100M_BIT    7U
+#define ALIF_CLK_ENA_CLK266M_BIT    21U
 #else
+#define ALIF_CLK_ENA_CLK100M_BIT    21U
+#endif
+#define ALIF_CLK_ENA_CLK160M_BIT    20U
+
 /* EXPMST0 control register config */
 #define ALIF_EXPMST0_CTRL_IPCLK_FORCE_BIT BIT(31U)
 #define ALIF_EXPMST0_CTRL_PCLK_FORCE_BIT  BIT(30U)
-#endif
 
 /** register offset (from clkid cell) */
 #define ALIF_CLOCK_CFG_REG(id) (((id) >> ALIF_CLOCK_REG_SHIFT) & ALIF_CLOCK_REG_MASK)
@@ -100,6 +114,8 @@ static uint32_t alif_get_input_clock(uint32_t clock_name)
 	case ALIF_CDC200_PIX_SYST_ACLK:
 	case ALIF_CSI_PIX_SYST_ACLK:
 	case ALIF_UTIMER_CLK:
+	case ALIF_OSPI0_ACLK_CLK:
+	case ALIF_OSPI1_ACLK_CLK:
 		return ALIF_CLOCK_SYST_ACLK_FREQ;
 	case ALIF_CANFD0_HFOSC_CLK:
 		return ALIF_CLOCK_HFOSC_CLK_FREQ;
@@ -146,13 +162,31 @@ static uint32_t alif_get_input_clock(uint32_t clock_name)
 	case ALIF_UART5_SYST_PCLK:
 	case ALIF_UART6_SYST_PCLK:
 	case ALIF_UART7_SYST_PCLK:
+	case ALIF_I2C0_PCLK:
+	case ALIF_I2C1_PCLK:
+	case ALIF_I2C0_GATED_CLK:
+	case ALIF_I2C1_GATED_CLK:
 		return ALIF_CLOCK_SYST_PCLK_FREQ;
+	case ALIF_UART0_38M4_CLK:
+	case ALIF_UART1_38M4_CLK:
+	case ALIF_UART2_38M4_CLK:
+	case ALIF_UART3_38M4_CLK:
+	case ALIF_UART4_38M4_CLK:
+	case ALIF_UART5_38M4_CLK:
+	case ALIF_UART6_38M4_CLK:
+	case ALIF_UART7_38M4_CLK:
+		return ALIF_CLOCK_HFOSC_CLK_FREQ;
 	case ALIF_LPUART_CLK:
 		return ALIF_CLOCK_SYST_CORE_FREQ;
 	case ALIF_I3C_CLK:
 		return ALIF_CLOCK_SYST_PCLK_FREQ;
 	case ALIF_LPI3C_CLK:
+	case ALIF_LPI2C1_CLK:
 		return ALIF_CLOCK_160M_CLK_FREQ;
+	case ALIF_LPSPI_CLK:
+		return ALIF_CLOCK_SYST_CORE_FREQ;
+	case ALIF_SPI_CLK:
+		return ALIF_CLOCK_SYST_HCLK_FREQ;
 #if CONFIG_COUNTER_SNPS_DW
 	case ALIF_LPTIMER0_LPTMR0_IO_PIN:
 		return CONFIG_LPTIMER0_EXT_CLK_FREQ;
@@ -162,6 +196,11 @@ static uint32_t alif_get_input_clock(uint32_t clock_name)
 		return CONFIG_LPTIMER2_EXT_CLK_FREQ;
 	case ALIF_LPTIMER3_LPTMR3_IO_PIN:
 		return CONFIG_LPTIMER3_EXT_CLK_FREQ;
+#endif
+#if defined(CONFIG_ENSEMBLE_GEN2)
+	case ALIF_OSPI0_266M_CLK:
+	case ALIF_OSPI1_266M_CLK:
+		return ALIF_CLOCK_266M_CLK_FREQ;
 #endif
 	default:
 		return 0;
@@ -287,7 +326,10 @@ static int alif_clock_control_on(const struct device *dev,
 			clock_control_subsys_t sub_system)
 {
 	uint32_t clk_id = (uint32_t) sub_system;
-	uint32_t cgu_module_base, module_base, reg_addr;
+	uint32_t module_base, reg_addr;
+#if defined(CONFIG_ENSEMBLE_GEN2)
+	uint32_t cgu_module_base;
+#endif
 	int32_t ret;
 
 	if (!ALIF_CLOCK_CFG_EN_MASK(clk_id)) {
@@ -313,6 +355,11 @@ static int alif_clock_control_on(const struct device *dev,
 #if defined(CONFIG_ENSEMBLE_GEN2)
 	case ALIF_PDM_76M8_CLK:
 	case ALIF_LPPDM_76M8_CLK:
+	case ALIF_I2S0_76M8_CLK:
+	case ALIF_I2S1_76M8_CLK:
+	case ALIF_I2S2_76M8_CLK:
+	case ALIF_I2S3_76M8_CLK:
+	case ALIF_LPI2S_76M8_CLK:
 		ret = alif_get_module_base(dev, ALIF_CGU_MODULE,
 					&cgu_module_base);
 		if (ret) {
@@ -323,9 +370,11 @@ static int alif_clock_control_on(const struct device *dev,
 		/* enable the HFOSCx2 clock */
 		sys_set_bit(reg_addr, ALIF_CLK_ENA_CLK76P8M_BIT);
 		break;
-#else
-	ARG_UNUSED(cgu_module_base);
-	/* Force enable ipclk and pclk as uart requires it */
+#endif
+
+#if !defined(CONFIG_ENSEMBLE_GEN2) || \
+	 (defined(CONFIG_ENSEMBLE_GEN2) && defined(CONFIG_UART_ASYNC_API))
+	/* Force enable pclk for UART — always on E7, DMA-only on E8 */
 	case ALIF_UART0_SYST_PCLK:
 	case ALIF_UART1_SYST_PCLK:
 	case ALIF_UART2_SYST_PCLK:
@@ -334,13 +383,21 @@ static int alif_clock_control_on(const struct device *dev,
 	case ALIF_UART5_SYST_PCLK:
 	case ALIF_UART6_SYST_PCLK:
 	case ALIF_UART7_SYST_PCLK:
+	case ALIF_UART0_38M4_CLK:
+	case ALIF_UART1_38M4_CLK:
+	case ALIF_UART2_38M4_CLK:
+	case ALIF_UART3_38M4_CLK:
+	case ALIF_UART4_38M4_CLK:
+	case ALIF_UART5_38M4_CLK:
+	case ALIF_UART6_38M4_CLK:
+	case ALIF_UART7_38M4_CLK:
 		reg_addr = module_base + ALIF_EXPMST0_CTRL_REG;
 
-		sys_write32((ALIF_EXPMST0_CTRL_IPCLK_FORCE_BIT |
-			    ALIF_EXPMST0_CTRL_PCLK_FORCE_BIT),
-			    reg_addr);
+		sys_set_bits(reg_addr, ALIF_EXPMST0_CTRL_PCLK_FORCE_BIT);
+
 		break;
 #endif
+
 	default:
 		break;
 	}
@@ -355,7 +412,7 @@ static int alif_clock_control_on(const struct device *dev,
 static int alif_clock_control_off(const struct device *dev,
 			clock_control_subsys_t sub_system)
 {
-	uint32_t clk_id = *(uint32_t *) sub_system;
+	uint32_t clk_id = (uint32_t) sub_system;
 	uint32_t module_base, reg_addr;
 	int32_t ret;
 
@@ -419,6 +476,10 @@ static int alif_clock_control_set_rate(const struct device *dev,
 	uint32_t frequency = (uint32_t) rate;
 	int32_t ret;
 
+	if (!frequency) {
+		return -EINVAL;
+	}
+
 	ret = alif_clock_control_get_rate(dev, sub_system, &curr_freq);
 	if (ret) {
 		return ret;
@@ -439,6 +500,21 @@ static int alif_clock_control_set_rate(const struct device *dev,
 	reg_addr = module_base + ALIF_CLOCK_CFG_REG(clk_id);
 
 	freq_div = (clk_freq / frequency);
+
+	/* Retain the EVX I2S divider limits after moving clock programming here. */
+	switch (clk_id) {
+	case ALIF_I2S0_76M8_CLK:
+	case ALIF_I2S1_76M8_CLK:
+	case ALIF_I2S2_76M8_CLK:
+	case ALIF_I2S3_76M8_CLK:
+	case ALIF_LPI2S_76M8_CLK:
+		if (freq_div < 2U) {
+			return -EINVAL;
+		}
+		break;
+	default:
+		break;
+	}
 
 	alif_get_div_reg_info(clk_id, &div_mask, &div_pos);
 
@@ -493,6 +569,31 @@ static inline int alif_clock_control_configure(const struct device *dev,
 		return 0;
 	}
 
+	switch (clk_id) {
+#if defined(CONFIG_ENSEMBLE_GEN2)
+	/* configure OSPI clock sources in CGU module */
+	case ALIF_OSPI0_266M_CLK:
+	case ALIF_OSPI1_266M_CLK:
+	case ALIF_OSPI0_ACLK_CLK:
+	case ALIF_OSPI1_ACLK_CLK:
+		ret = alif_get_module_base(dev, ALIF_CGU_MODULE, &module_base);
+		if (ret) {
+			return ret;
+		}
+		reg_addr = module_base + ALIF_MISC_CLK_CTRL_REG;
+
+		reg_value = sys_read32(reg_addr);
+		reg_value &= ~(ALIF_CLOCK_CFG_CLK_SRC_MASK(clk_id) <<
+				ALIF_CLOCK_CFG_CLK_BIT_POS(clk_id));
+		reg_value |= (ALIF_CLOCK_CFG_CLK_SRC(clk_id) <<
+				ALIF_CLOCK_CFG_CLK_BIT_POS(clk_id));
+		sys_write32(reg_value, reg_addr);
+		return 0;
+#endif
+	default:
+		break;
+	}
+
 	ret = alif_get_module_base(dev, ALIF_CLOCK_CFG_MODULE(clk_id),
 					&module_base);
 	if (ret) {
@@ -504,6 +605,54 @@ static inline int alif_clock_control_configure(const struct device *dev,
 	reg_value &= ~(ALIF_CLOCK_CFG_CLK_SRC_MASK(clk_id) << ALIF_CLOCK_CFG_CLK_BIT_POS(clk_id));
 	reg_value |= (ALIF_CLOCK_CFG_CLK_SRC(clk_id) << ALIF_CLOCK_CFG_CLK_BIT_POS(clk_id));
 	sys_write32(reg_value, reg_addr);
+
+	return 0;
+}
+
+static int clockctrl_init(const struct device *dev)
+{
+	uint32_t cgu_mask = 0;
+	uint32_t cgu_module_base;
+	int32_t ret;
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_76p8M), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK76P8M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_10m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK10M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_38p4m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK38P4M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_20m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK20M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_100m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK100M_BIT);
+#endif
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(clk_160m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK160M_BIT);
+#endif
+
+#if defined(CONFIG_ENSEMBLE_GEN2) && DT_NODE_HAS_STATUS(DT_NODELABEL(clk_266m), okay)
+	cgu_mask |= BIT(ALIF_CLK_ENA_CLK266M_BIT);
+#endif
+
+	/* enable cgu clock */
+	if (cgu_mask) {
+		ret = alif_get_module_base(dev, ALIF_CGU_MODULE,
+					&cgu_module_base);
+		if (ret) {
+			return -ENODEV;
+		}
+
+		sys_set_bits(cgu_module_base + ALIF_CLK_ENA_REG, cgu_mask);
+	}
 
 	return 0;
 }
@@ -527,6 +676,6 @@ static const struct clock_control_alif_config config = {
 	.m55hp_cfg_base = DT_INST_REG_ADDR_BY_NAME(0, m55hp_cfg)
 };
 
-DEVICE_DT_DEFINE(DT_NODELABEL(clockctrl), NULL, NULL, NULL, &config, PRE_KERNEL_1,
+DEVICE_DT_DEFINE(DT_NODELABEL(clockctrl), clockctrl_init, NULL, NULL, &config, PRE_KERNEL_1,
 				CONFIG_CLOCK_CONTROL_INIT_PRIORITY,
 				&alif_clock_control_driver_api);

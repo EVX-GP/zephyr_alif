@@ -309,7 +309,7 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_PCIE), "NS16550(s) in DT need CONFIG_PCIE");
 #if defined(CONFIG_UART_ASYNC_API)
 struct uart_ns16550_rx_dma_params {
 	const struct device *dma_dev;
-	uint8_t dma_channel;
+	uint32_t dma_channel;
 	bool async_enabled;
 	struct dma_config dma_cfg;
 	struct dma_block_config active_dma_block;
@@ -323,7 +323,7 @@ struct uart_ns16550_rx_dma_params {
 
 struct uart_ns16550_tx_dma_params {
 	const struct device *dma_dev;
-	uint8_t dma_channel;
+	uint32_t dma_channel;
 	struct dma_config dma_cfg;
 	struct dma_block_config active_dma_block;
 	const uint8_t *buf;
@@ -514,6 +514,24 @@ static inline uintptr_t get_port(const struct device *dev)
 	return port;
 }
 
+static uint32_t get_uart_baudrate_frac_divisor(const struct device *dev,
+					  uint32_t baud_rate,
+					  uint32_t pclk)
+{
+	ARG_UNUSED(dev);
+
+#if UART_NS16550_DLF_ENABLED
+	/* DLF is in use.
+	 * calculate baud rate fractional divisor. a variant of
+	 * (uint32_t)((pclk + 0.5 * baud_rate)/ (baud_rate))
+	 * use 4 LSB of the calculation
+	 */
+	return ((pclk + (baud_rate >> 1)) / baud_rate) & 0xF;
+#else
+	return 0;
+#endif
+}
+
 static uint32_t get_uart_baudrate_divisor(const struct device *dev,
 					  uint32_t baud_rate,
 					  uint32_t pclk)
@@ -628,10 +646,6 @@ static int uart_ns16550_configure(const struct device *dev,
 		ns16550_outbyte(dev_cfg, SRR(dev), SRR_UR);
 	}
 
-#if UART_NS16550_DLF_ENABLED
-	ns16550_outbyte(dev_cfg, DLF(dev), dev_data->dlf);
-#endif
-
 #if UART_NS16550_PCP_ENABLED
 	uint32_t pcp = dev_cfg->pcp;
 
@@ -678,6 +692,14 @@ static int uart_ns16550_configure(const struct device *dev,
 			goto out;
 		}
 	}
+#if UART_NS16550_DLF_ENABLED
+	if (dev_cfg->sys_clk_freq != 0U) {
+		ns16550_outbyte(dev_cfg, DLF(dev), dev_data->dlf);
+	} else {
+		ns16550_outbyte(dev_cfg, DLF(dev),
+					get_uart_baudrate_frac_divisor(dev, cfg->baudrate, pclk));
+	}
+#endif
 
 	set_baud_rate(dev, cfg->baudrate, pclk);
 
@@ -802,11 +824,7 @@ static int uart_ns16550_configure(const struct device *dev,
 		struct dma_config *p_dma_cfg =
 			&dev_data->async.tx_dma_params.dma_cfg;
 		p_dma_cfg->source_burst_length = p_dma_cfg->dest_burst_length =
-			dev_data->fifo_size / 4
-#if CONFIG_DMA_PL330
-			- 1
-#endif
-			;
+			dev_data->fifo_size / 4;
 	}
 #endif
 
@@ -2307,12 +2325,8 @@ static DEVICE_API(uart, uart_ns16550_driver_api) = {
 
 #ifdef CONFIG_UART_ASYNC_API
 #if CONFIG_DMA_PL330
-#define DMA_BURST_LEN 0 /* Real len will be value + 1 */
-#define DMA_BURST_SIZE 0 /* Burst size is a shifter: 0x1 << DMA_BURST_SIZE bytes  */
 #define DMA_SLOT_GET(n, d) DT_INST_DMAS_CELL_BY_NAME(n, d, periph)
 #else
-#define DMA_BURST_LEN 1
-#define DMA_BURST_SIZE 1
 #define DMA_SLOT_GET(n, d) DT_INST_DMAS_CELL_BY_NAME(n, d, channel)
 #endif
 
@@ -2323,10 +2337,10 @@ static DEVICE_API(uart, uart_ns16550_driver_api) = {
 		.dma_channel =							\
 			DT_INST_DMAS_CELL_BY_NAME(n, tx, channel),		\
 		.dma_cfg = {							\
-			.source_burst_length = DMA_BURST_LEN,			\
-			.dest_burst_length = DMA_BURST_LEN,			\
-			.source_data_size = DMA_BURST_SIZE,			\
-			.dest_data_size = DMA_BURST_SIZE,			\
+			.source_burst_length = 1,				\
+			.dest_burst_length = 1,					\
+			.source_data_size = 1,					\
+			.dest_data_size = 1,					\
 			.complete_callback_en = 0,				\
 			.error_callback_dis = 1,				\
 			.block_count = 1,					\
@@ -2342,10 +2356,10 @@ static DEVICE_API(uart, uart_ns16550_driver_api) = {
 		.dma_channel =							\
 			DT_INST_DMAS_CELL_BY_NAME(n, rx, channel),		\
 		.dma_cfg = {							\
-			.source_burst_length = DMA_BURST_LEN,			\
-			.dest_burst_length = DMA_BURST_LEN,			\
-			.source_data_size = DMA_BURST_SIZE,			\
-			.dest_data_size = DMA_BURST_SIZE,			\
+			.source_burst_length = 1,				\
+			.dest_burst_length = 1,					\
+			.source_data_size = 1,					\
+			.dest_data_size = 1,					\
 			.complete_callback_en = 0,				\
 			.error_callback_dis = 1,				\
 			.block_count = 1,					\

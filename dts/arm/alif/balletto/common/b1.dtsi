@@ -85,10 +85,10 @@
 		};
 	};
 
-	ns: ns@2002a000 {
+	ns: ns@20040000 {
 		compatible = "zephyr,memory-region";
 		/* TGU Block Size(128KB) Aligned always */
-		reg = <0x2002a000 DT_SIZE_K(512)>;
+		reg = <0x20040000 DT_SIZE_K(512)>;
 		zephyr,memory-region = "NON_SECURE0";
 		status = "disabled";
 	};
@@ -120,16 +120,18 @@
 	};
 
 	sdhc: sdhc@48102000 {
-		compatible = "intel,emmc-host";
+		compatible = "snps,dwc-sdhc";
 		reg = <0x48102000 0xF70>;
 		interrupt-parent = <&nvic>;
-		interrupts = <102 ALIF_DEFAULT_IRQ_PRIORITY>;
+		interrupts = <102 ALIF_DEFAULT_IRQ_PRIORITY>,
+					<103 ALIF_DEFAULT_IRQ_PRIORITY>;
+		interrupt-names = "sdmmc", "sdmmc_wakeup";
 		max-bus-freq = <25000000U>;
 		min-bus-freq = <400000>;
 		power-delay-ms = <1000>;
 		pinctrl-0 = <&pinctrl_sdmmc>;
 		pinctrl-names = "default";
-		reset-gpios = <&gpio7 0 GPIO_ACTIVE_HIGH>;
+		cd-gpios = <&gpio6 5 GPIO_ACTIVE_LOW>;
 		mmc {
 			compatible = "zephyr,sdmmc-disk";
 			bus-width = <4>;
@@ -604,7 +606,8 @@
 			<0x4902A000 0x100>,
 			<0x4902B000 0x100>;
 		reg-names	 = "cmp_reg", "config_reg","dac6_reg","adc_vref";
-		clocks		 = <&clockctrl ALIF_CMP1_CLK>;
+		clocks		 = <&clockctrl ALIF_CMP1_CLK>,
+				   <&clockctrl ALIF_CMP0_CLK>;
 		pinctrl-0	 = < &pinctrl_cmp1 >;
 		pinctrl-names	 = "default";
 		driver_instance	 = "CMP_INSTANCE_1";
@@ -635,18 +638,22 @@
 	i2c0: i2c0@49010000 {
 		compatible = "snps,designware-i2c";
 		clock-frequency = <I2C_BITRATE_STANDARD>;
+		clocks = <&clockctrl ALIF_I2C0_GATED_CLK>;
 		/*
 		 * For Standard  speed LCNT=0 and HCNT=0
-		 * For Fast      speed LCNT=50 and HCNT=30
-		 * For Fast Plus speed LCNT=35 and HCNT=5
+		 * For Fast      speed LCNT=10 and HCNT=10
+		 * For Fast Plus speed LCNT=3 and HCNT=3
 		 */
 		hcnt-offset = <0>;
 		lcnt-offset = <0>;
+		fs-spike-len = <5>;
+		hs-spike-len = <1>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 		reg = <0x49010000 0x1000>;
 		pinctrl-0 = <&pinctrl_i2c0>;
-		pinctrl-names = "default";
+		pinctrl-1 = <&pinctrl_i2c0_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupt-parent = <&nvic>;
 		interrupts = <132 ALIF_DEFAULT_IRQ_PRIORITY>;
 		tx_threshold = <16>;
@@ -657,18 +664,22 @@
 	i2c1: i2c1@49011000 {
 		compatible = "snps,designware-i2c";
 		clock-frequency = <I2C_BITRATE_STANDARD>;
+		clocks = <&clockctrl ALIF_I2C1_GATED_CLK>;
 		/*
 		 * For Standard  speed LCNT=0 and HCNT=0
-		 * For Fast      speed LCNT=50 and HCNT=30
-		 * For Fast Plus speed LCNT=35 and HCNT=5
+		 * For Fast      speed LCNT=10 and HCNT=10
+		 * For Fast Plus speed LCNT=3 and HCNT=3
 		 */
 		hcnt-offset = <0>;
 		lcnt-offset = <0>;
+		fs-spike-len = <5>;
+		hs-spike-len = <1>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 		reg = <0x49011000 0x1000>;
 		pinctrl-0 = <&pinctrl_i2c1>;
-		pinctrl-names = "default";
+		pinctrl-1 = <&pinctrl_i2c1_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupt-parent = <&nvic>;
 		interrupts = <133 ALIF_DEFAULT_IRQ_PRIORITY>;
 		tx_threshold = <16>;
@@ -699,6 +710,40 @@
 		pinctrl-names   = "default";
 		i3c-scl-hz      = <10000000>;
 		i2c-scl-hz      = <400000>;
+		status          = "disabled";
+	};
+
+	can0: can@49036000 {
+		compatible      = "cast,can";
+		reg             = <0x49036000 0x1000 0x49037000 0x1000>;
+		reg-names       = "can_reg", "can_cnt_reg";
+		interrupt-parent= <&nvic>;
+		interrupts      = <104 0>;
+		interrupt-names = "can_interrupt";
+		clocks          = <&clockctrl ALIF_CANFD0_160M_CLK>;
+		clock-frequency = <20000000>;
+		pinctrl-0       = <&pinctrl_can0>;
+		pinctrl-names   = "default";
+		can-fd;
+		can-fd-ctrl-reg	= <0x4902F00C>;
+		can-fd-bit	= <10>;
+		status          = "disabled";
+	};
+
+	can1: can@49038000 {
+		compatible      = "cast,can";
+		reg             = <0x49038000 0x1000 0x49039000 0x1000>;
+		reg-names       = "can_reg", "can_cnt_reg";
+		interrupt-parent= <&nvic>;
+		interrupts      = <105 0>;
+		interrupt-names = "can_interrupt";
+		clocks          = <&clockctrl ALIF_CANFD1_160M_CLK>;
+		clock-frequency = <20000000>;
+		pinctrl-0       = <&pinctrl_can1>;
+		pinctrl-names   = "default";
+		can-fd;
+		can-fd-ctrl-reg	= <0x4902F00C>;
+		can-fd-bit	= <26>;
 		status          = "disabled";
 	};
 
@@ -734,7 +779,7 @@
 	uart_hci: uart@4300a000 {
 		compatible = "ns16550";
 		reg = <0x4300a000 0x100>;
-		clock-frequency = <160000000>;
+		clocks = <&clockctrl ALIF_HCI_AHI_CLK>;
 		interrupts = <50 0>;
 		reg-shift = <2>;
 		current-speed = <3000000>;
@@ -752,7 +797,7 @@
 	uart_ahi: uart@4300b000 {
 		compatible = "ns16550";
 		reg = <0x4300b000 0x100>;
-		clock-frequency = <160000000>;
+		clocks = <&clockctrl ALIF_HCI_AHI_CLK>;
 		interrupts = <51 0>;
 		reg-shift = <2>;
 		current-speed = <3000000>;
@@ -766,24 +811,41 @@
 		compatible = "arm,dma-pl330";
 		reg = <0x400C0000 0x1000>;
 		reg-names = "pl330_regs";
-		dma-channels = <4>;
+		dma-channels = <8>;
 		#dma-cells = <2>;
 		interrupt-parent = <&nvic>;
 		interrupts = <0 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <1 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <2 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <3 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <4 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <5 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <6 ALIF_DEFAULT_IRQ_PRIORITY>,
+			     <7 ALIF_DEFAULT_IRQ_PRIORITY>,
 			     <32 ALIF_DEFAULT_IRQ_PRIORITY>;
 		interrupt-names = "channel0", "channel1",
 				"channel2", "channel3",
+				"channel4", "channel5",
+				"channel6", "channel7",
 				"abort";
+		clocks = <&clockctrl ALIF_DMA2_CLK>;
+		status = "disabled";
+	};
+
+	evtrtr2: event-router@400e2000 {
+		compatible = "alif,dma-event-router";
+		reg = <0x400e2000 0x100>;
+		dma-controller = <&dma2>;
+		channels = <32>;
+		dma-groups = <4>;
+		#dma-cells = <2>;
 		status = "disabled";
 	};
 
 	crc0: crc0@48107000 {
 		compatible = "alif,alif-crc";
 		reg = <0x48107000 0x1000>;
-		crc_algo = "CRC_8_BIT_SIZE";
+		crc-algo = "crc8-ccitt";
 		status = "disabled";
 	};
 
@@ -793,11 +855,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi0 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi0_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48103000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <137 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -810,11 +873,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi1 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi1_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48104000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <138 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_hclk>;
+		clocks = <&clockctrl ALIF_SPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -827,7 +891,8 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_spi2 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_spi2_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x48105000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <139 ALIF_DEFAULT_IRQ_PRIORITY>;
@@ -843,11 +908,12 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		pinctrl-0 = < &pinctrl_lpspi0 >;
-		pinctrl-names = "default";
+		pinctrl-1 = < &pinctrl_lpspi0_sleep >;
+		pinctrl-names = "default", "sleep";
 		reg = <0x43000000 0x1000>;
 		interrupt-parent = <&nvic>;
 		interrupts = <46 ALIF_DEFAULT_IRQ_PRIORITY>;
-		clocks = <&syst_core>;
+		clocks = <&clockctrl ALIF_LPSPI_CLK>;
 		fifo-depth = <16>;
 		max-xfer-size = <32>;
 		rx-delay = <4>;
@@ -1050,34 +1116,36 @@
 
 	i2s0: i2s0@49014000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_0";
 		reg = <0x49014000 0x1000>;
-		pinctrl-names = "default";
+		power-domains = <&pd_syst>;
 		pinctrl-0 = <&pinctrl_i2s0>;
+		pinctrl-1 = <&pinctrl_i2s0_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <141 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S0_76M8_CLK>;
 		status = "disabled";
 	};
 
 	i2s1: i2s1@49015000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_1";
 		reg = <0x49015000 0x1000>;
-		pinctrl-names = "default";
+		power-domains = <&pd_syst>;
 		pinctrl-0 = <&pinctrl_i2s1>;
+		pinctrl-1 = <&pinctrl_i2s1_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <142 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_I2S1_76M8_CLK>;
 		status = "disabled";
 	};
 
 	i2s4: lpi2s@43001000 {
 		compatible = "snps,designware-i2s";
-		clock-frequency = <76800000>;
-		driver-instance	= "I2S_INSTANCE_4";
 		reg = <0x43001000 0x1000>;
-		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_lpi2s>;
+		pinctrl-1 = <&pinctrl_lpi2s_sleep>;
+		pinctrl-names = "default", "sleep";
 		interrupts = <48 ALIF_DEFAULT_IRQ_PRIORITY>;
+		clocks = <&clockctrl ALIF_LPI2S_76M8_CLK>;
 		status = "disabled";
 	};
 
@@ -1249,27 +1317,6 @@
 		xip-wait-cycles = <15>;
 		xip-base-address = <0xB0000000 0x20000000>;
 		status = "disabled";
-
-		ospi_flash: ospi_flash@0 {
-			compatible = "issi,xspi-flash-controller";
-			reg = <0x0>;
-			erase-value = <0xff>;
-			num-of-sector = <16384>;
-			page-size = <4096>;
-			sector-size = <4096>;
-			write-block-size = <2>;
-
-			/* Flash Size 64MB */
-			#address-cells = <1>;
-			#size-cells = <1>;
-
-			flash_storage: flash_storage@0 {
-				compatible = "soc-nv-flash";
-				reg = <0x0 DT_SIZE_M(64)>;
-				erase-block-size = <DT_SIZE_K(4)>;
-				write-block-size = <2>;
-			};
-		};
 	};
 };
 
@@ -1339,6 +1386,34 @@
 			clock-frequency = <160000000>;
 			#clock-cells = <0>;
 		};
+
+		clk_38p4m: clk_38p4m {
+			compatible = "fixed-clock";
+			clock-frequency = <38400000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_20m: clk_20m {
+			compatible = "fixed-clock";
+			clock-frequency = <20000000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_100m: clk_100m {
+			compatible = "fixed-clock";
+			clock-frequency = <100000000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
+
+		clk_160m: clk_160m {
+			compatible = "fixed-clock";
+			clock-frequency = <160000000>;
+			status = "disabled";
+			#clock-cells = <0>;
+		};
 	};
 
 	chosen {
@@ -1404,11 +1479,13 @@
 	};
 
 	power-states {
-		subsys_off: subsys_off {
+		suspend_idle: suspend_idle {
 			compatible = "zephyr,power-state";
-			power-state-name = "soft-off";
-			min-residency-us = <5000000>;
-			exit-latency-us = <60000>;
+			power-state-name = "suspend-to-idle";
+			min-residency-us = <2500>;
+			exit-latency-us = <500>;
+			substate-id = <0>;
+			zephyr,pm-device-disabled;
 			status = "disabled";
 		};
 		standby_s2ram: standby_s2ram {
@@ -1427,6 +1504,13 @@
 			substate-id = <1>;
 			status = "disabled";
 		};
+		subsys_off: subsys_off {
+			compatible = "zephyr,power-state";
+			power-state-name = "soft-off";
+			min-residency-us = <5000000>;
+			exit-latency-us = <60000>;
+			status = "disabled";
+		};
 	};
 
 	cpus {
@@ -1439,7 +1523,7 @@
 			d-cache-line-size = <32>;
 			i-cache-line-size = <32>;
 			reg = <0>;
-			cpu-power-states = <&subsys_off &standby_s2ram &stop_s2ram>;
+			cpu-power-states = <&suspend_idle &standby_s2ram &stop_s2ram &subsys_off>;
 		};
 	};
 };

@@ -12,6 +12,9 @@
 #include <soc.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/cache.h>
+#include <zephyr/drivers/dma/dma_pl330.h>
+#include <zephyr/pm/device.h>
 
 #include "dma_pl330.h"
 #include <soc_memory_map.h>
@@ -27,6 +30,45 @@ LOG_MODULE_REGISTER(dma_pl330);
 
 static int dma_pl330_submit(const struct device *dev, uint64_t dst,
 			    uint64_t src, uint32_t channel, uint32_t size);
+
+
+/*
+ * Start a scatter-gather block transfer
+ *
+ * Loads the given block's configuration into the channel and initiates
+ * the DMA transfer for that block. Used for both initial block start and
+ * advancing through the scatter-gather chain.
+ */
+static int dma_pl330_start_block(const struct device *dev,
+				 uint32_t channel,
+				 struct dma_block_config *blk)
+{
+	const struct dma_pl330_dev_data *const dev_data = dev->data;
+	struct dma_pl330_ch_config *channel_cfg = &dev_data->channels[channel];
+
+	/* ensure there is a valid block to transfer */
+	if (!blk) {
+		return -EINVAL;
+	}
+
+	/* load the current block's source, destination and size
+	 * into the channel config so dma_pl330_submit() can use them
+	 */
+	channel_cfg->src_addr = local_to_global(UINT_TO_POINTER(blk->source_address));
+	channel_cfg->dst_addr = local_to_global(UINT_TO_POINTER(blk->dest_address));
+	channel_cfg->trans_size = blk->block_size;
+
+	/* set address adjustments per block for scatter-gather */
+	channel_cfg->src_addr_adj = blk->source_addr_adj;
+	channel_cfg->dst_addr_adj = blk->dest_addr_adj;
+
+	/* kick off the DMA transfer for this block — writes microcode
+	 * and fires DMAGO via the PL330 debug interface
+	 */
+	return dma_pl330_submit(dev, channel_cfg->dst_addr,
+			 channel_cfg->src_addr, channel,
+			 channel_cfg->trans_size);
+}
 
 static void dma_pl330_get_counter(struct dma_pl330_ch_internal *ch_handle,
 				  uint32_t *psrc_byte_width,
@@ -347,6 +389,8 @@ static int dma_pl330_setup_ch(const struct device *dev,
 
 	channel_cfg->loop_counter0 = loop_counter0;
 
+	sys_cache_data_flush_range(UINT_TO_POINTER(dma_exec_addr), offset + 4);
+
 	return 0;
 }
 
@@ -358,19 +402,21 @@ static int dma_pl330_start_dma_ch(const struct device *dev,
 	uint32_t count = 0U;
 	uint32_t data;
 	uint32_t inten;
-	unsigned int irq_key;
+	k_spinlock_key_t key;
 	uint32_t irq = dev_data->event_irq[ch];
 
 	channel_cfg = &dev_data->channels[ch];
+
+	key = k_spin_lock(&dev_data->lock);
+
 	do {
 		data = sys_read32(reg_base + DMAC_PL330_DBGSTATUS);
 		if (++count > DMA_TIMEOUT_US) {
+			k_spin_unlock(&dev_data->lock, key);
 			return -ETIMEDOUT;
 		}
 		k_busy_wait(1);
 	} while ((data & DATA_MASK) != 0);
-
-	irq_key = irq_lock();
 
 	sys_write32(((ch << DMA_INTSR1_SHIFT) +
 		    (DMA_INTSR0 << DMA_INTSR0_SHIFT) +
@@ -387,16 +433,7 @@ static int dma_pl330_start_dma_ch(const struct device *dev,
 
 	sys_write32(0x0, reg_base + DMAC_PL330_DBGCMD);
 
-	irq_unlock(irq_key);
-
-	count = 0U;
-	do {
-		data = sys_read32(reg_base + DMAC_PL330_DBGCMD);
-		if (++count > DMA_TIMEOUT_US) {
-			return -ETIMEDOUT;
-		}
-		k_busy_wait(1);
-	} while ((data & DATA_MASK) != 0);
+	k_spin_unlock(&dev_data->lock, key);
 
 	return 0;
 }
@@ -622,6 +659,7 @@ static int dma_pl330_configure(const struct device *dev, uint32_t channel,
 	struct dma_pl330_ch_config *channel_cfg;
 	struct dma_pl330_ch_internal *ch_handle;
 	uint32_t bsize;
+	uint32_t count = (cfg->block_count > 0) ? cfg->block_count : 1;
 
 	if (channel >= dev_cfg->max_dma_channels) {
 		return -EINVAL;
@@ -688,6 +726,36 @@ static int dma_pl330_configure(const struct device *dev, uint32_t channel,
 	channel_cfg->dma_callback = cfg->dma_callback;
 	channel_cfg->user_data = cfg->user_data;
 
+	/*
+	 * Scatter-gather configuration
+	 *
+	 * Initialize the scatter-gather chain pointers and count the total
+	 * number of blocks. Validate that address adjustments are supported.
+	 */
+	if (!cfg->head_block) {
+		return -EINVAL;
+	}
+
+	if (count > CONFIG_DMA_PL330_MAX_BLOCK_COUNT) {
+		LOG_ERR("DMA PL330: block_count %u exceeds CONFIG_DMA_PL330_MAX_BLOCK_COUNT=%u; ",
+			count, CONFIG_DMA_PL330_MAX_BLOCK_COUNT);
+		return -EINVAL;
+	}
+
+	memset(channel_cfg->block_pool, 0, sizeof(channel_cfg->block_pool));
+
+	struct dma_block_config *src = cfg->head_block;
+
+	for (uint32_t i = 0; i < count && src != NULL; i++) {
+		memcpy(&channel_cfg->block_pool[i], src, sizeof(*src));
+		channel_cfg->block_pool[i].next_block =
+			(i + 1 < count) ? &channel_cfg->block_pool[i + 1] : NULL;
+		src = src->next_block;
+	}
+
+	channel_cfg->head_block    = &channel_cfg->block_pool[0];
+	channel_cfg->current_block = &channel_cfg->block_pool[0];
+
 	if (cfg->head_block->source_addr_adj == DMA_ADDR_ADJ_INCREMENT ||
 	    cfg->head_block->source_addr_adj == DMA_ADDR_ADJ_NO_CHANGE) {
 		channel_cfg->src_addr_adj = cfg->head_block->source_addr_adj;
@@ -724,12 +792,70 @@ static int dma_pl330_transfer_start(const struct device *dev,
 		return -EBUSY;
 	}
 
-	ret = dma_pl330_submit(dev, channel_cfg->dst_addr,
-			       channel_cfg->src_addr, channel,
-			       channel_cfg->trans_size);
+	/*
+	 * Scatter-gather initialization
+	 *
+	 * Reset to the head block and start the first block transfer.
+	 * The ISR will handle advancing through subsequent blocks.
+	 */
+	channel_cfg->current_block = channel_cfg->head_block;
+	ret = dma_pl330_start_block(dev, channel, channel_cfg->current_block);
 
 	if (!channel_cfg->dma_callback || ret) {
 		/* Free the channel if polling was used or en error has happen */
+		atomic_set(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE);
+	}
+
+	return ret;
+}
+
+int dma_pl330_start_with_mcode(const struct device *dev,
+				uint32_t channel,
+				const uint8_t *mcode_addr,
+				size_t mcode_len)
+{
+	const struct dma_pl330_config *const dev_cfg = dev->config;
+	struct dma_pl330_dev_data *const dev_data = dev->data;
+	struct dma_pl330_ch_config *channel_cfg;
+	struct dma_pl330_ch_internal *ch_handle;
+	int ret;
+
+	if (channel >= dev_cfg->max_dma_channels) {
+		return -EINVAL;
+	}
+
+	if (!mcode_len || mcode_len > MICROCODE_SIZE_MAX) {
+		return -EINVAL;
+	}
+
+	if (!mcode_addr) {
+		return -EINVAL;
+	}
+
+	channel_cfg = &dev_data->channels[channel];
+	ch_handle = &channel_cfg->internal;
+
+	if (!atomic_cas(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE,
+			DMA_CHANNEL_IS_IN_USE)) {
+		return -EBUSY;
+	}
+
+	memcpy(UINT_TO_POINTER(channel_cfg->dma_exec_addr), mcode_addr, mcode_len);
+	sys_cache_data_flush_range(UINT_TO_POINTER(channel_cfg->dma_exec_addr), mcode_len);
+
+	ret = dma_pl330_start_dma_ch(dev, dev_cfg->reg_base, channel,
+				     ch_handle->nonsec_mode);
+	if (ret) {
+		LOG_ERR("Failed to start DMA PL330 with custom microcode");
+		atomic_set(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE);
+		return ret;
+	}
+
+	if (!channel_cfg->dma_callback) {
+		ret = dma_pl330_wait(dev_cfg->reg_base, channel);
+		if (ret) {
+			LOG_ERR("Timeout waiting for DMA PL330 custom microcode");
+		}
 		atomic_set(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE);
 	}
 
@@ -771,17 +897,16 @@ static void dma_pl330_isr(const struct device *dev)
 	uint32_t intmis, fsrc, ch;
 	uint32_t reg_base = dev_cfg->reg_base;
 
-	/* First make sure there is no Abort in Manager */
+	/* check manager fault — log only, keep going */
 	if (sys_read32(reg_base + DMAC_PL330_FSRD) & 0x1) {
 		LOG_ERR("DMA Manager thread is faulting = %x",
 			sys_read32(reg_base + DMAC_PL330_FTRD));
 	}
 
-	/*
-	 *	Read Channel Fault status
-	 */
+	/* read channel fault status */
 	fsrc = sys_read32(reg_base + DMAC_PL330_FSRC);
 	if (fsrc) {
+		/* fault path */
 		for (ch = 0; ch < dev_cfg->max_dma_channels; ch++) {
 			if (fsrc & (1 << ch)) {
 				channel_cfg = &dev_data->channels[ch];
@@ -792,7 +917,6 @@ static void dma_pl330_isr(const struct device *dev)
 				(void)dma_pl330_stop_dma_ch(dev, reg_base, ch);
 
 				channel_cfg = &dev_data->channels[ch];
-
 				atomic_set(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE);
 
 				if (channel_cfg->dma_callback) {
@@ -802,19 +926,50 @@ static void dma_pl330_isr(const struct device *dev)
 			}
 		}
 	} else {
-		/*
-		 *	Issue channel callback
-		 *	Here the assumption is that channel number and irq number
-		 *	are mapped one-to-one
-		 */
+		/* normal completion path */
 		intmis = sys_read32(reg_base + DMAC_PL330_INTMIS);
 
 		for (ch = 0; ch < dev_cfg->max_dma_channels; ch++) {
 			if (intmis & (1 << ch)) {
+
+				/* clear interrupt first */
 				sys_write32((1 << ch), reg_base + DMAC_PL330_INTCLR);
 
 				channel_cfg = &dev_data->channels[ch];
 
+				/*
+				 * Scatter-gather block chaining
+				 *
+				 * If there are more blocks in the chain, advance to the next
+				 * block and start its transfer. Skip the completion callback
+				 * until all blocks are done.
+				 */
+				if (channel_cfg->current_block &&
+					channel_cfg->current_block->next_block) {
+
+					/* advance to next block */
+					channel_cfg->current_block =
+						channel_cfg->current_block->next_block;
+
+					/* start next block; on error fall through to callback */
+					if (dma_pl330_start_block(dev, ch,
+							channel_cfg->current_block) == 0) {
+						/* skip callback — not done yet */
+						continue;
+					}
+
+					/* error starting next block */
+					atomic_set(&channel_cfg->channel_is_active,
+						   DMA_CHANNEL_IS_FREE);
+					if (channel_cfg->dma_callback) {
+						channel_cfg->dma_callback(dev,
+							channel_cfg->user_data,
+							ch, -EIO);
+					}
+					continue;
+				}
+
+				/* no more blocks — all done */
 				atomic_set(&channel_cfg->channel_is_active, DMA_CHANNEL_IS_FREE);
 
 				if (channel_cfg->dma_callback) {
@@ -832,6 +987,20 @@ static int dma_pl330_initialize(const struct device *dev)
 	struct dma_pl330_dev_data *const dev_data = dev->data;
 	struct dma_pl330_ch_config *channel_cfg;
 	uint8_t event_index;
+
+	if (dev_cfg->clk_dev != NULL) {
+		if (!device_is_ready(dev_cfg->clk_dev)) {
+			LOG_ERR("%s: clock device %s not ready",
+				dev->name, dev_cfg->clk_dev->name);
+			return -ENODEV;
+		}
+		int ret = clock_control_on(dev_cfg->clk_dev, dev_cfg->clk_subsys);
+
+		if (ret < 0 && ret != -EALREADY) {
+			LOG_ERR("%s: failed to enable DMA clock: %d", dev->name, ret);
+			return ret;
+		}
+	}
 
 	for (int channel = 0; channel < dev_cfg->max_dma_channels; channel++) {
 		channel_cfg = &dev_data->channels[channel];
@@ -903,11 +1072,22 @@ static int dma_pl330_dma_reload(const struct device *dev, uint32_t const channel
 		return -EBUSY;
 	}
 
-	channel_cfg->src_addr = local_to_global(UINT_TO_POINTER(src));
-	channel_cfg->dst_addr = local_to_global(UINT_TO_POINTER(dst));
-	channel_cfg->trans_size = size;
+	channel_cfg->block_pool[0].source_address = src;
+	channel_cfg->block_pool[0].dest_address   = dst;
+	channel_cfg->block_pool[0].block_size     = size;
 
 	return 0;
+}
+
+static int dma_pl330_get_attribute(const struct device *dev, uint32_t type, uint32_t *value)
+{
+	switch (type) {
+	case DMA_ATTR_MAX_BLOCK_COUNT:
+		*value = CONFIG_DMA_PL330_MAX_BLOCK_COUNT;
+		return 0;
+	default:
+		return -EINVAL;
+	}
 }
 
 static DEVICE_API(dma, pl330_driver_api) = {
@@ -915,8 +1095,51 @@ static DEVICE_API(dma, pl330_driver_api) = {
 	.reload = dma_pl330_dma_reload,
 	.start = dma_pl330_transfer_start,
 	.stop = dma_pl330_transfer_stop,
-	.get_status = dma_pl330_get_status,
+	.get_status    = dma_pl330_get_status,
+	.get_attribute = dma_pl330_get_attribute,
 };
+
+#ifdef CONFIG_PM_DEVICE
+static int dma_pl330_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	const struct dma_pl330_config *const dev_cfg = dev->config;
+	struct dma_pl330_dev_data *const dev_data = dev->data;
+	int ret = 0;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_RESUME:
+		if (dev_cfg->clk_dev != NULL) {
+			ret = clock_control_on(dev_cfg->clk_dev, dev_cfg->clk_subsys);
+			if (ret == -EALREADY) {
+				ret = 0;
+			}
+		}
+		break;
+	case PM_DEVICE_ACTION_SUSPEND:
+		for (int ch = 0; ch < dev_cfg->max_dma_channels; ch++) {
+			if (atomic_get(&dev_data->channels[ch].channel_is_active) !=
+			    DMA_CHANNEL_IS_FREE) {
+				return -EBUSY;
+			}
+		}
+		if (dev_cfg->clk_dev != NULL) {
+			ret = clock_control_off(dev_cfg->clk_dev, dev_cfg->clk_subsys);
+			if (ret == -EALREADY) {
+				ret = 0;
+			}
+		}
+		break;
+	case PM_DEVICE_ACTION_TURN_ON:
+	case PM_DEVICE_ACTION_TURN_OFF:
+		break;
+	default:
+		ret = -ENOTSUP;
+		break;
+	}
+
+	return ret;
+}
+#endif /* CONFIG_PM_DEVICE */
 
 #define IRQ_CONFIGURE(n, inst)                                                                 \
 	IRQ_CONNECT(DT_INST_IRQ_BY_IDX(inst, n, irq),                                          \
@@ -948,6 +1171,12 @@ static DEVICE_API(dma, pl330_driver_api) = {
 	[DT_INST_PROP(inst, dma_channels)];
 
 /********************** Device Definition per instance Macros. ***********************/
+#define CLOCK_CFG(inst)                                                                       \
+	COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, clocks),                                      \
+		(.clk_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(inst)),                         \
+		 .clk_subsys = (clock_control_subsys_t)DT_INST_CLOCKS_CELL(inst, clkid),),    \
+		(.clk_dev = NULL, .clk_subsys = NULL,))
+
 #define DMAC_PL330_INIT(inst)                                                                  \
 	static void dma_pl330_irq_configure_##inst(const struct device *dev);                  \
 	MCODE_BASE_ALLOC(inst);                                                                \
@@ -962,13 +1191,16 @@ static DEVICE_API(dma, pl330_driver_api) = {
 		.max_dma_channels = DT_INST_PROP(inst, dma_channels),                          \
 		.irq_configure = dma_pl330_irq_configure_##inst,                               \
 		.num_irqs = DT_NUM_IRQS(DT_DRV_INST(inst)),                                    \
+		CLOCK_CFG(inst)                                                                \
 	};                                                                                     \
                                                                                                \
 	static struct dma_pl330_dev_data pl330_data##inst = {                                  \
 		.channels = dma##inst##_pl330_channels,                                        \
 	};                                                                                     \
                                                                                                \
-	DEVICE_DT_INST_DEFINE(inst, &dma_pl330_initialize, NULL,                               \
+	PM_DEVICE_DT_INST_DEFINE(inst, dma_pl330_pm_action);                                   \
+                                                                                               \
+	DEVICE_DT_INST_DEFINE(inst, &dma_pl330_initialize, PM_DEVICE_DT_INST_GET(inst),        \
 				&pl330_data##inst, &pl330_config##inst,                        \
 				POST_KERNEL, CONFIG_DMA_INIT_PRIORITY,                         \
 				&pl330_driver_api);                                            \

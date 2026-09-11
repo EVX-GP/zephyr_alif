@@ -48,6 +48,16 @@ using decoder from TIM3 through pins PA6 and PA7:
         };
     };
 
+To build and flash this sample for ALIF boards :ref:`alif_e7_dk/ae722f80f55d5xx/rtss_he`:
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/sensor/qdec
+   :board: alif_e7_dk/ae722f80f55d5xx/rtss_he
+   :goals: build
+   :gen-args: -S alif-qdec
+
+Replace "alif_e7_dk/ae722f80f55d5xx/rtss_he" with the appropriate board name for other supported boards.
+
 Sample Output
 =============
 
