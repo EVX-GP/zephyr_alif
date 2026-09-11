@@ -65,7 +65,8 @@ enum udc_dwc3_msg_type {
 #define DWC3DATA(drv) CONTAINER_OF(drv, struct udc_dwc3_data, drv)
 
 static udc_dwc3_event_buffer_t udc_dwc3_evt_buf;
-static uint8_t udc_dwc3_event_buff[USB_EVENT_BUFFER_SIZE];
+/* Keep event DMA cache maintenance separate from the software message queue. */
+UDC_STATIC_BUF_DEFINE(udc_dwc3_event_buff, USB_EVENT_BUFFER_SIZE);
 static char udc_dwc3_msgq_buf[CONFIG_UDC_DWC3_MAX_QMESSAGES * sizeof(struct udc_dwc3_msg)];
 
 static uint32_t udc_dwc3_get_ep_transfer_resource_index(udc_dwc3_driver_t *drv,
@@ -1321,6 +1322,8 @@ static udc_dwc3_event_buffer_t *udc_dwc3_init_event_buffer(udc_dwc3_driver_t *dr
 	event_buf->buf = udc_dwc3_event_buff;
 	/* Fill the event buffer with zeros */
 	memset(event_buf->buf, 0, USB_EVENT_BUFFER_SIZE);
+	/* Publish initialization before the controller can write DMA events. */
+	sys_cache_data_flush_range(event_buf->buf, USB_EVENT_BUFFER_SIZE);
 	return event_buf;
 }
 
