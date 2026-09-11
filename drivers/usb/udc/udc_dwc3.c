@@ -2184,6 +2184,14 @@ static int udc_dwc3_ep_enqueue(const struct device *dev, struct udc_ep_config *e
 	int ret;
 
 	udc_buf_put(epcfg, buf);
+	/* Queue behind the active DMA request. Completion starts the next head;
+	 * starting it here too can submit the same consumed buffer as a ZLP. */
+	if (EP_NUM(epcfg->addr) != 0) {
+		if (udc_ep_is_busy(dev, epcfg->addr)) {
+			return 0;
+		}
+		buf = udc_buf_peek(dev, epcfg->addr);
+	}
 	lock_key = irq_lock();
 	if (USB_EP_DIR_IS_IN(epcfg->addr)) {
 		ret = udc_dwc3_tx(dev, epcfg->addr, buf);
