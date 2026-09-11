@@ -2355,6 +2355,16 @@ static void handle_data_out(struct udc_dwc3_data *priv, uint8_t ep_num, uint16_t
 		LOG_ERR("ep 0x%02x queue is empty", ep);
 		return;
 	}
+	if (recv_bytes > net_buf_tailroom(buf)) {
+		udc_submit_ep_event(dev, buf, -EOVERFLOW);
+		return;
+	}
+	/* RX DMA completed before this message was queued. Buffers can still
+	 * contain cache lines from the previous OUT request. Invalidate before
+	 * the CPU/USB class sees the received bytes (including EP0 data OUT).
+	 * UDC buffers have cache-line alignment and allocation granularity.
+	 */
+	sys_cache_data_invd_range(buf->data, recv_bytes);
 	net_buf_add(buf, recv_bytes);
 	if (ep == USB_CONTROL_EP_OUT) {
 		if (udc_ctrl_stage_is_status_out(dev)) {
