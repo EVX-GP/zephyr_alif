@@ -365,6 +365,7 @@ struct csi2_dw_data {
 	uint32_t sensors_map;
 	uint32_t streaming_map;
 	struct alif_csi_health health;
+	bool capture_guard;
 	struct timings time[CSI2_NUM_SENSORS];
 
 	const struct cpi_csi2_mode_settings *csi_cpi_settings[CSI2_NUM_SENSORS];

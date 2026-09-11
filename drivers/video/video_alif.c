@@ -771,6 +771,15 @@ static int alif_cam_dequeue(const struct device *dev, enum video_endpoint_id ep,
 static int alif_cam_set_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
 	if (cid == VIDEO_CID_ALIF_CPI_TRIGGERED) { return triggered_set_config(dev, value); }
+	if (cid == VIDEO_CID_ALIF_CPI_INHIBIT) {
+		if (!value || !((struct video_cam_data *)dev->data)->triggered.config.period_us) {
+			return -EINVAL;
+		}
+		unsigned int key = irq_lock();
+		triggered_fail(dev, *(int32_t *)value ? *(int32_t *)value : -ECANCELED);
+		irq_unlock(key);
+		return 0; /* retain every buffer and CSI until external trigger stop is acknowledged */
+	}
 
 	const struct video_cam_config *config = dev->config;
 	int ret = -ENOTSUP;

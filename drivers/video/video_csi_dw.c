@@ -99,6 +99,20 @@ static void csi2_dw_irq(const struct device *dev)
 	global_st = sys_read32(regs + CSI_INT_ST_MAIN);
 	struct csi2_dw_data *data = dev->data;
 	if (global_st) { data->health.events++; data->health.status |= global_st; }
+	if (global_st && data->capture_guard) {
+		if (global_st & CSI_INT_ST_MAIN_IPI_FATAL) {
+			data->health.ipi_status |= sys_read32(regs + CSI_INT_ST_IPI_FATAL);
+		}
+		/* Preserve first fault, avoid interrupt storms and autonomous IPI reset.
+		 * HP inhibits CPI, then coordinates HE trigger stop before teardown. */
+		const uint16_t masks[] = {CSI_INT_MSK_PHY_FATAL, CSI_INT_MSK_PKT_FATAL,
+			CSI_INT_MSK_PHY, CSI_INT_MSK_LINE, CSI_INT_MSK_IPI_FATAL,
+			CSI_INT_MSK_BNDRY_FRAME_FATAL, CSI_INT_MSK_SEQ_FRAME_FATAL,
+			CSI_INT_MSK_CRC_FRAME_FATAL, CSI_INT_MSK_PLD_CRC_FATAL,
+			CSI_INT_MSK_DATA_ID, CSI_INT_MSK_ECC_CORRECT};
+		for (size_t i = 0; i < ARRAY_SIZE(masks); ++i) { sys_write32(0, regs + masks[i]); }
+		return;
+	}
 	if (global_st & CSI_INT_ST_MAIN_IPI_FATAL) {
 		event_st = sys_read32(regs + CSI_INT_ST_IPI_FATAL);
 		LOG_ERR("Fatal Interrupt at IPI interface. status - 0x%x", event_st);
@@ -350,6 +364,7 @@ static int csi2_dw_validate_data(const struct device *dev)
 		(uint32_t)pixclock);
 
 	tmp = (uint32_t)pixclock;
+	data->health.pixel_clock_requested_hz = tmp;
 	ret = clock_control_set_rate(config->clk_dev, config->pixclk,
 			(clock_control_subsys_rate_t)tmp);
 	if (ret) {
@@ -358,6 +373,11 @@ static int csi2_dw_validate_data(const struct device *dev)
 	}
 
 	if (config->ipi_mode == CSI2_IPI_MODE_TIMINGS_CAM) {
+		/* Record the realized rate without changing the validated timing formula.
+		 * Internal CSI/CPI clock limits and HSD remain vendor/bench gates. */
+		data->health.pixel_clock_realized_hz = 0;
+		(void)clock_control_get_rate(config->clk_dev, config->pixclk,
+			&data->health.pixel_clock_realized_hz);
 		/*
 		 * FV(VSYNC) comes at least 3 pixel clocks before
 		 * LV(HSYNC/DATA_EN). Hence, setting HSA as 3.
@@ -599,6 +619,11 @@ static int csi2_dw_set_ctrl(const struct device *dev, unsigned int cid, void *va
 	int ret = 0;
 
 	switch (cid) {
+	case VIDEO_CID_ALIF_CSI_GUARD:
+		if (!value) { return -EINVAL; }
+		if (!*(uint32_t *)value && data->streaming_map) { return -EBUSY; }
+		data->capture_guard = !!*(uint32_t *)value;
+		return 0;
 	case VIDEO_CID_ALIF_CSI_DPHY_FREQ:
 		data->phy[data->current_sensor].pll_fin = *((uint32_t *)value);
 		LOG_DBG("DPHY New PLL Freq. %d", data->phy[data->current_sensor].pll_fin);

@@ -5,7 +5,7 @@ enum alif_cpi_owner { CPI_UNUSED, CPI_QUEUED, CPI_ACTIVE, CPI_COMPLETE, CPI_CLIE
 struct alif_cpi_slot {
 	struct video_buffer *buffer;
 	enum alif_cpi_owner owner;
-	uint32_t sequence, timestamp_us;
+	uint32_t sequence, timestamp_us, completion_cycles;
 };
 struct alif_cpi_triggered_data {
 	struct alif_cpi_triggered_config config;
@@ -13,6 +13,7 @@ struct alif_cpi_triggered_data {
 	struct alif_cpi_slot slots[ALIF_CPI_OWNERS];
 	struct alif_cpi_slot *active;
 	uint32_t last_cycles, last_vsync_us, csi_events;
+	uint32_t queued, completed;
 	uint64_t elapsed_cycles;
 	bool vsync_seen, pipeline_started;
 };

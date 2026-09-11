@@ -19,7 +19,7 @@
  * @param[in] sender : pointer to MHUV2 sender interface
  * @return  0 on success, negative error code on failure
  */
-static int mhuv2_send_access_request(struct MHUV2_SND *sender)
+static int mhuv2_send_access_request(struct MHUV2_SND *sender, bool wait)
 {
 	uint32_t snd_timeout = TIMEOUT_TICKS;
 
@@ -27,6 +27,11 @@ static int mhuv2_send_access_request(struct MHUV2_SND *sender)
 	sender->ACCESS_REQUEST = MHU_ACC_REQ;
 
 	if (!(sender->ACCESS_READY & MHU_ACC_RDY)) {
+		if (!wait) {
+			/* ipm_send(wait=0) must never run the legacy multi-million-read loop.
+			 * Leave access requested so a later bounded retry can observe ready. */
+			return -EBUSY;
+		}
 		while (snd_timeout) {
 			if ((sender->ACCESS_READY & MHU_ACC_RDY)) {
 				/* Receiver is ready */
@@ -58,10 +63,10 @@ static int mhuv2_send_access_request(struct MHUV2_SND *sender)
 static int mhuv2_send(const struct device *dev, int wait, uint32_t ch_id,
 		      const void *pdata, int size)
 {
+	if (dev == NULL || pdata == NULL) { return -EINVAL; }
 	struct mhuv2_device_data *data = DRV_MHUV2_DATA(dev);
 	int ret = 0;
 
-	ARG_UNUSED(wait);
 	ARG_UNUSED(size);
 
 	if ((dev == NULL) || (pdata == NULL) || ch_id >= data->max_ch) {
@@ -70,7 +75,7 @@ static int mhuv2_send(const struct device *dev, int wait, uint32_t ch_id,
 
 	struct MHUV2_SND *SND = (struct MHUV2_SND *)DEVICE_MMIO_GET(dev);
 
-	ret = mhuv2_send_access_request(SND);
+	ret = mhuv2_send_access_request(SND, wait != 0);
 	if (ret < 0) {
 		return ret;
 	}
@@ -351,7 +356,7 @@ static int mhuv2_poll_out(const struct device *dev, uint32_t ch_id,
 
 	struct MHUV2_SND *SND = (struct MHUV2_SND *)DEVICE_MMIO_GET(dev);
 
-	ret = mhuv2_send_access_request(SND);
+	ret = mhuv2_send_access_request(SND, true);
 	if (ret < 0) {
 		return ret;
 	}
