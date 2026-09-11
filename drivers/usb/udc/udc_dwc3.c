@@ -1208,6 +1208,8 @@ static int32_t udc_dwc3_ep_enable(udc_dwc3_driver_t *drv, uint8_t ep_num, uint8_
 			trb_link->buf_ptr_high = 0;
 			trb_link->ctrl |= USB_TRBCTL_LINK_TRB;
 			SET_BIT(trb_link->ctrl, USB_TRB_CTRL_HWO);
+			/* Publish the ring link before DMA can wrap to it. */
+			sys_cache_data_flush_range(trb_link, sizeof(*trb_link));
 			return USB_SUCCESS;
 		}
 		return USB_SUCCESS;
