@@ -484,6 +484,56 @@ static void udc_dwc3_clear_stall_all_eps(udc_dwc3_driver_t *drv)
 	}
 }
 
+/* SKYO diagnostic proposal: completion observations, no transfer changes. */
+#ifdef CONFIG_UDC_DWC3_IN_COMPLETION_TRACE
+struct skyo_dwc3_in_observation {
+	uint32_t magic, version, completions, anomalies;
+	uint32_t residual_events, status_events, hwo_events, endpoint;
+	uint32_t first_completion, first_requested, first_size, first_ctrl;
+	uint32_t first_buffer, first_dequeue, first_enqueue, reserved;
+};
+struct skyo_dwc3_in_observation skyo_dwc3_in_trace[16] __aligned(32);
+
+static void skyo_dwc3_trace_in(uint8_t physical_ep, const udc_dwc3_ep_t *ep,
+			       const udc_dwc3_trb_t *trb)
+{
+	if (physical_ep < 2U || ep->ep_dir != USB_DIR_IN || ep->ep_index >= 16U) {
+		return;
+	}
+	struct skyo_dwc3_in_observation *s = &skyo_dwc3_in_trace[ep->ep_index];
+	bool residual = (trb->size & USB_TRB_SIZE_MASK) != 0U;
+	bool status = USB_TRB_SIZE_TRBSTS(trb->size) != 0U;
+	bool owned = (trb->ctrl & USB_TRB_CTRL_HWO) != 0U;
+	bool anomaly = residual || status || owned;
+	bool first = anomaly && s->anomalies == 0U;
+
+	s->magic = 0x53494e54U;
+	s->version = 1U;
+	s->endpoint = ep->ep_index | USB_REQUEST_IN;
+	s->completions++;
+	s->anomalies += anomaly;
+	s->residual_events += residual;
+	s->status_events += status;
+	s->hwo_events += owned;
+	if (first) {
+		s->first_completion = s->completions;
+		s->first_requested = ep->ep_requested_bytes;
+		s->first_size = trb->size;
+		s->first_ctrl = trb->ctrl;
+		s->first_buffer = trb->buf_ptr_low;
+		s->first_dequeue = ep->trb_dequeue;
+		s->first_enqueue = ep->trb_enqueue;
+	}
+	/* No payload hashing, logging or clock calls in this IRQ path. Publish
+	 * the first anomaly immediately and counters every 64 observations.
+	 * A halted RAM read may therefore trail the counters by up to 63 events.
+	 */
+	if (first || s->completions == 1U || (s->completions & 63U) == 0U) {
+		sys_cache_data_flush_range(s, sizeof(*s));
+	}
+}
+#endif /* CONFIG_UDC_DWC3_IN_COMPLETION_TRACE */
+
 static void udc_dwc3_ep_xfer_complete(udc_dwc3_driver_t *drv, uint8_t endp_number)
 {
 	udc_dwc3_trb_t      *trb_ptr;
@@ -496,6 +546,9 @@ static void udc_dwc3_ep_xfer_complete(udc_dwc3_driver_t *drv, uint8_t endp_numbe
 	dir = ept->ep_dir;
 	trb_ptr = &ept->ep_trb[ept->trb_dequeue];
 	sys_cache_data_invd_range(trb_ptr, sizeof(*trb_ptr));
+#ifdef CONFIG_UDC_DWC3_IN_COMPLETION_TRACE
+	skyo_dwc3_trace_in(endp_number, ept, trb_ptr);
+#endif
 	trb_status = USB_TRB_SIZE_TRBSTS(trb_ptr->size);
 	if (trb_status == USB_TRBSTS_SETUP_PENDING) {
 		drv->setup_packet_pending = true;
