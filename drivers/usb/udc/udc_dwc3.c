@@ -184,6 +184,8 @@ static void udc_dwc3_prepare_setup(udc_dwc3_driver_t *drv)
 	udc_dwc3_ep_t       *ept;
 	uint32_t ret;
 
+	drv->ep0_status_in_ready = false;
+	drv->ep0_status_pending = false;
 	/* Setup packet always on EP0 */
 	ept = &drv->eps[USB_CONTROL_EP];
 	trb_ptr = &drv->ep0_trb;
@@ -213,6 +215,8 @@ static void udc_dwc3_prepare_setup(udc_dwc3_driver_t *drv)
 			ept->ep_dir);
 }
 
+static int32_t udc_dwc3_ep0_status_ready(udc_dwc3_driver_t *drv);
+
 static int32_t udc_dwc3_ep0_send(udc_dwc3_driver_t *drv, uint8_t ep_num, uint8_t dir,
 		uint8_t *bufferptr, uint32_t buf_len)
 {
@@ -223,7 +227,7 @@ static int32_t udc_dwc3_ep0_send(udc_dwc3_driver_t *drv, uint8_t ep_num, uint8_t
 	uint8_t phy_ep;
 
 	if (buf_len == 0) {
-		return USB_EP_BUFF_LENGTH_INVALID;
+		return udc_dwc3_ep0_status_ready(drv);
 	}
 	/* Control IN - EP1 */
 	phy_ep = USB_GET_PHYSICAL_EP(ep_num, dir);
@@ -856,6 +860,29 @@ static int32_t udc_dwc3_ep0_send_recv_status(udc_dwc3_driver_t *drv, uint8_t end
 	return ret;
 }
 
+/* Both the host token and the upper-layer acknowledgement are required.
+ * Either may arrive first. In particular, never acknowledge a control OUT
+ * request before its class handler has accepted and queued its status buffer.
+ */
+static int32_t udc_dwc3_ep0_status_ready(udc_dwc3_driver_t *drv)
+{
+	drv->ep0_status_in_ready = true;
+	if (drv->ep0_status_pending) {
+		drv->ep0_status_pending = false;
+		return udc_dwc3_ep0_send_recv_status(drv, USB_CTRL_PHY_EP1);
+	}
+	return USB_SUCCESS;
+}
+
+static int32_t udc_dwc3_ep0_status_request(udc_dwc3_driver_t *drv, uint8_t ep)
+{
+	if (!drv->ep0_expect_in && !drv->ep0_status_in_ready) {
+		drv->ep0_status_pending = true;
+		return USB_SUCCESS;
+	}
+	return udc_dwc3_ep0_send_recv_status(drv, ep);
+}
+
 static int32_t udc_dwc3_ep0_stall_restart(udc_dwc3_driver_t *drv, uint8_t ep_num, uint8_t dir)
 {
 	uint8_t        phy_ep;
@@ -940,6 +967,19 @@ static void udc_dwc3_ep0_status_done(udc_dwc3_driver_t *drv)
 		LOG_ERR("trb_status pending at status done");
 	}
 	drv->actual_length = 0;
+	/* Report the completed handshake before queuing the next SETUP. The
+	 * common control pipe owns status buffers until this notification.
+	 * SETUP_PENDING aborts the old request; never report it as successful.
+	 */
+	if (trb_status == 0U) {
+		if (drv->ep0_expect_in) {
+			if (drv->udc_dwc3_data_out_cb != NULL) {
+				drv->udc_dwc3_data_out_cb(drv, 0);
+			}
+		} else if (drv->udc_dwc3_data_in_cb != NULL) {
+			drv->udc_dwc3_data_in_cb(drv, USB_REQUEST_IN);
+		}
+	}
 	drv->ep0_state = EP0_SETUP_PHASE;
 	/* prepare the setup trb to receive next setup packet */
 	udc_dwc3_prepare_setup(drv);
@@ -1017,7 +1057,7 @@ static void udc_dwc3_depevt_handler(udc_dwc3_driver_t *drv, uint32_t reg)
 				if (drv->setup_data.bRequest == USB_SET_ADDRESS_REQ) {
 					udc_dwc3_set_device_address(drv, drv->setup_data.wValue);
 				}
-				udc_dwc3_ep0_send_recv_status(drv, endp_number);
+				udc_dwc3_ep0_status_request(drv, endp_number);
 			} else {
 				/* Do nothing  */
 			}
@@ -2354,10 +2394,12 @@ static int udc_dwc3_tx(const struct device *dev, uint8_t ep, struct net_buf *buf
 
 	data = buf->data;
 	len = buf->len;
-	buf->data += len;
+	if (len) {
+		buf->data += len;
+	}
 	buf->len -= len;
 
-	if ((data == NULL) && (len == 0) && (ep_dir != 0)) {
+	if ((data == NULL) && (len == 0) && (ep_dir != 0) && ep_type != USB_CONTROL_EP) {
 		return 0;
 	}
 
@@ -2578,16 +2620,24 @@ static void handle_data_in(struct udc_dwc3_data *priv, uint8_t epnum)
 	if (ep == USB_CONTROL_EP_IN) {
 		if (udc_ctrl_stage_is_status_in(dev) || udc_ctrl_stage_is_no_data(dev)) {
 			/* Status stage finished, notify upper layer */
+			udc_ctrl_update_stage(dev, buf);
 			udc_ctrl_submit_status(dev, buf);
+			return;
 		}
 		/* Update to next stage of control transfer */
 		udc_ctrl_update_stage(dev, buf);
 		if (udc_ctrl_stage_is_status_out(dev)) {
-			/*
-			 * IN transfer finished, release buffer,
-			 * control OUT buffer should be already fed.
+			/* DWC3 arms STATUS OUT itself on XFERNOTREADY. Retain the
+			 * completed IN buffer as its zero-length completion token;
+			 * do not start a second DMA receive on the shared EP0 TRB.
 			 */
-			net_buf_unref(buf);
+			struct udc_buf_info *bi = udc_get_buf_info(buf);
+
+			net_buf_reset(buf);
+			bi->ep = USB_CONTROL_EP_OUT;
+			bi->data = false;
+			bi->status = true;
+			udc_buf_put(udc_get_ep_cfg(dev, USB_CONTROL_EP_OUT), buf);
 		}
 		return;
 	}

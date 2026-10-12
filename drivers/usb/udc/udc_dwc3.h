@@ -238,6 +238,8 @@ typedef struct udc_dwc3_driver {
 	uint32_t             usb2_phy_config;
 	bool                 setup_packet_pending:1;
 	bool                 three_stage_setup:1;
+	bool                 ep0_status_in_ready:1;
+	bool                 ep0_status_pending:1;
 	bool                 ep0_expect_in:1;
 	uint32_t             revision;
 	uint8_t              current_dr_role;
