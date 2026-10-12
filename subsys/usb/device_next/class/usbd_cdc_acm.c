@@ -507,8 +507,13 @@ static int usbd_cdc_acm_init(struct usbd_class_data *const c_data)
 	desc->if0_union.bSubordinateInterface0 = desc->if1.bInterfaceNumber;
 
 	if (cfg->if_desc_data != NULL) {
-		if (usbd_add_descriptor(uds_ctx, cfg->if_desc_data)) {
-			LOG_ERR("Failed to add interface string descriptor");
+		int ret = usbd_add_descriptor(uds_ctx, cfg->if_desc_data);
+
+		/* HS and FS configurations initialize this same class instance.
+		 * Its string is shared: reuse the index on the second pass.
+		 */
+		if (ret != 0 && ret != -EALREADY) {
+			LOG_ERR("Failed to add interface string descriptor: %d", ret);
 		} else {
 			desc->if0.iInterface = usbd_str_desc_get_idx(cfg->if_desc_data);
 		}

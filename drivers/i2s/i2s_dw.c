@@ -108,7 +108,7 @@ static int i2s_dw_set_clock_rate(const struct i2s_dw_cfg *cfg,
 	if (sclk > UINT32_MAX) { return -EINVAL; }
 
 	return clock_control_set_rate(cfg->clk_dev, cfg->clkid,
-				      (clock_control_subsys_rate_t)sclk);
+				      (clock_control_subsys_rate_t)(uint32_t)sclk);
 }
 
 static void i2s_dw_enable_controller(const struct device *dev, uint32_t word_size)
