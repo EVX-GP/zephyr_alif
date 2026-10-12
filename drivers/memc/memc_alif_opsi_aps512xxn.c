@@ -64,6 +64,13 @@ LOG_MODULE_REGISTER(memc_alif_aps512xxn, CONFIG_MEMC_LOG_LEVEL);
 #define APS256XXN_OSPI_RX_FIFO_THRESHOLD       0
 #define APS256XXN_OSPI_DFS                     16
 
+#define APS512XXN_POWER_ACTIVE                 0U
+#define APS512XXN_POWER_HALFSLEEP              1U
+#define APS512XXN_POWER_DEEP_POWER_DOWN        2U
+
+#define APS512XXN_MODE_REG6_HALFSLEEP          0xF0U
+#define APS512XXN_MODE_REG6_DEEP_POWER_DOWN    0xC0U
+
 /**IRQ declaration */
 typedef void (*irq_config_func_t)(const struct device *dev);
 
@@ -91,6 +98,7 @@ struct alif_ospi_aps512xxn_data {
 	struct ospi_trans_config trans_conf;
 	struct k_event event;
 	uint8_t write_latency;
+	uint8_t power_state;
 };
 
 static int32_t err_map_alif_hal_to_zephyr(int32_t err)
@@ -253,12 +261,206 @@ irq_failed:
 	return ret;
 }
 
-static int memc_alif_ospi_aps512xxn_init(const struct device *dev)
+static void aps512xxn_exit_low_power_pulse(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_config *config = dev->config;
+
+	ospi_control_ss(config->regs, config->cs_pin, SPI_SS_STATE_ENABLE);
+	k_busy_wait(1);
+	ospi_control_ss(config->regs, config->cs_pin, SPI_SS_STATE_DISABLE);
+}
+
+static int aps512xxn_configure_runtime(const struct device *dev)
 {
 	const struct alif_ospi_aps512xxn_config *config = dev->config;
 	struct alif_ospi_aps512xxn_data *data = dev->data;
 	struct ospi_xip_config aps512xxn_xip_cfg;
 	uint8_t id_reg = 0, reg_value;
+	int32_t ret;
+
+	/* APS256XXN global reset */
+	ret = aps512xxn_global_reset(dev);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Global Reset Failed");
+		return ret;
+	}
+
+	/* Read APS256XXN ID */
+	ret = aps512xxn_read_reg(dev, APS256XXN_MODE_REG2_ADDR, &id_reg,
+				APS256XXN_INIT_REG_READ_WAIT_CYCLES);
+	if ((ret != 0) || (id_reg != APS256XXN_ID)) {
+		LOG_ERR("APS512XXN Read ID Reg Failed");
+		return ret ? ret : -ENODEV;
+	}
+
+	/* config read wait cycles, variable latency */
+	reg_value = (0x0 << APS512XXN_MODE_REG0_LATENCY_TYPE |
+			(config->latency_code - 3) << APS512XXN_MODE_REG0_READ_LATENCY_CODE |
+			 0x0 << APS512XXN_MODE_REG0_DRIVE_STR);
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG0_ADDR, reg_value);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 0 Config Failed");
+		return ret;
+	}
+
+	/* config write latency, auto slow refresh rate */
+	reg_value = (0x0 << APS512XXN_MODE_REG4_READ_RF_RATE |
+			data->write_latency << APS512XXN_MODE_REG4_WRITE_LATENCY_CODE |
+			0x0 << APS512XXN_MODE_REG4_PASR);
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG4_ADDR, reg_value);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 4 Config Failed");
+		return ret;
+	}
+
+	/* config device mode, burst len & disable hybrid burst */
+	reg_value = ((config->dual_octal ? 0 : 1) << APS512XXN_MODE_REG8_BURST_LEN |
+			 0x0 << APS512XXN_MODE_REG8_BURST_TYPE |
+			 0x0 << APS512XXN_MODE_REG8_RBX_READ_EN |
+			 config->dual_octal << APS512XXN_MODE_REG8_TRANSFER_MODE);
+	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG8_ADDR, reg_value);
+	if (ret != 0) {
+		LOG_ERR("APS512XXN Mode Reg 8 Config Failed");
+		return ret;
+	}
+
+	aps512xxn_xip_cfg.xip_mod_bits = 0;
+	aps512xxn_xip_cfg.incr_cmd = APS256XXN_CMD_LINEAR_BURST_READ;
+	aps512xxn_xip_cfg.wrap_cmd = APS256XXN_CMD_SYNC_READ;
+	aps512xxn_xip_cfg.write_incr_cmd = APS256XXN_CMD_LINEAR_BURST_WRITE;
+	aps512xxn_xip_cfg.write_wrap_cmd = APS256XXN_CMD_SYNC_WRITE;
+	aps512xxn_xip_cfg.xip_cnt_time_out = config->xip_wait_cycles;
+	aps512xxn_xip_cfg.xip_wait_cycles = config->latency_code - 1;
+
+	/* OSPI xip configuration */
+	ospi_psram_xip_init(config->regs, &aps512xxn_xip_cfg, config->dual_octal);
+
+	/* config address control shim for dual octal mode */
+	if (config->dual_octal) {
+		struct aes_addr_ctrl ram_addr_ctrl;
+		/**
+		 *  SPI address signalling              Corresponding HADDR/AxADDR bits in
+		 *
+		 *   --  RA12 RA4  CA7                        --  23 15  8
+		 *   --  RA11 RA3  CA6                        --  22 14  7
+		 *   --  RA10 RA2  CA5                        --  21 13  6
+		 *   --  RA9  RA1  CA4                        --  20 12  5
+		 *   --  RA8  RA0  CA3                        --  19 11  4
+		 *   --  RA7  --   CA2                        --  18 --  3
+		 *  RA14 RA6  CA9  CA1                        25  17 10  2
+		 *  RA13 RA5  CA8  CA0 (=0)                   24  16 9   1 (=0)
+		 *
+		 *  We massage HADDR using the shim in front of the controller to insert the gap
+		 *  between CA9 and RA0 - between HADDR[10] and HADDR[11].
+		 *  SPI controller shifts HADDR down 1 when in dual octal mode to form a 16-bit word
+		 *  address.
+		 *
+		 *  | Logical Byte Address | After Shift (Word Address) | Meaning            |
+		 *  | -------------------- | -------------------------- | ------------------ |
+		 *  | 0x000000             | 0x000000                   | First 16-bit word  |
+		 *  | 0x000002             | 0x000001                   | Second 16-bit word |
+		 *  | 0x000004             | 0x000002                   | Third 16-bit word  |
+		 *  So, instead of each address pointing to a single byte, now each address points
+		 *  to a 16-bit (2-byte) word.
+		 */
+
+		ram_addr_ctrl.addr_lower_bits   = 11;
+		ram_addr_ctrl.addr_upper_shift  = 12;
+		ram_addr_ctrl.addr_mask         = 0x7FF;
+		if (config->cs_pin == 0) {
+			ram_addr_ctrl.ss0_array_mode_en = 1;
+			ram_addr_ctrl.ss1_array_mode_en = 0;
+		} else if (config->cs_pin == 1) {
+			ram_addr_ctrl.ss0_array_mode_en = 0;
+			ram_addr_ctrl.ss1_array_mode_en = 1;
+		} else {
+			LOG_ERR("Invalid chip select value");
+			return -EINVAL;
+		}
+
+
+		aes_ctrl_xip_addr(config->aes_regs, &ram_addr_ctrl);
+	}
+
+	aes_set_rxds_delay(config->aes_regs, config->rxds_delay);
+
+	aes_enable_xip(config->aes_regs);
+
+	return 0;
+}
+
+int alif_psram_set_power_state(const struct device *dev, uint8_t state)
+{
+	struct alif_ospi_aps512xxn_data *data;
+	int ret = 0;
+
+	if (dev == NULL) {
+		return -EINVAL;
+	}
+
+	data = dev->data;
+
+	if (data->power_state == state) {
+		return 0;
+	}
+
+	if (data->power_state != APS512XXN_POWER_ACTIVE) {
+		aps512xxn_exit_low_power_pulse(dev);
+		if (data->power_state == APS512XXN_POWER_HALFSLEEP) {
+			k_busy_wait(200);
+		} else {
+			k_busy_wait(200);
+			ret = aps512xxn_configure_runtime(dev);
+			if (ret != 0) {
+				return ret;
+			}
+		}
+		data->power_state = APS512XXN_POWER_ACTIVE;
+	}
+
+	switch (state) {
+	case APS512XXN_POWER_ACTIVE:
+		return 0;
+
+	case APS512XXN_POWER_HALFSLEEP:
+		ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG6_ADDR,
+					  APS512XXN_MODE_REG6_HALFSLEEP);
+		if (ret == 0) {
+			k_busy_wait(200);
+			data->power_state = state;
+		}
+		return ret;
+
+	case APS512XXN_POWER_DEEP_POWER_DOWN:
+		ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG6_ADDR,
+					  APS512XXN_MODE_REG6_DEEP_POWER_DOWN);
+		if (ret == 0) {
+			k_busy_wait(600);
+			data->power_state = state;
+		}
+		return ret;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+uint8_t alif_psram_get_power_state(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_data *data;
+
+	if (dev == NULL) {
+		return APS512XXN_POWER_ACTIVE;
+	}
+
+	data = dev->data;
+	return data->power_state;
+}
+
+static int memc_alif_ospi_aps512xxn_init(const struct device *dev)
+{
+	const struct alif_ospi_aps512xxn_config *config = dev->config;
+	struct alif_ospi_aps512xxn_data *data = dev->data;
 	int32_t ret;
 	struct ospi_init init_config;
 
@@ -361,115 +563,11 @@ static int memc_alif_ospi_aps512xxn_init(const struct device *dev)
 		return -EINVAL; /* Invalid WLC */
 	}
 
-	/* APS256XXN global reset */
-	ret = aps512xxn_global_reset(dev);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Global Reset Failed");
-		return ret;
+	ret = aps512xxn_configure_runtime(dev);
+	if (ret == 0) {
+		data->power_state = APS512XXN_POWER_ACTIVE;
 	}
-
-	/* Read APS256XXN ID */
-	ret = aps512xxn_read_reg(dev, APS256XXN_MODE_REG2_ADDR, &id_reg,
-				APS256XXN_INIT_REG_READ_WAIT_CYCLES);
-	if ((ret != 0) || (id_reg != APS256XXN_ID)) {
-		LOG_ERR("APS512XXN Read ID Reg Failed");
-		return ret;
-	}
-
-	/* config read wait cycles, variable latency */
-	reg_value = (0x0 << APS512XXN_MODE_REG0_LATENCY_TYPE |
-			(config->latency_code - 3) << APS512XXN_MODE_REG0_READ_LATENCY_CODE |
-			 0x0 << APS512XXN_MODE_REG0_DRIVE_STR);
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG0_ADDR, reg_value);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 0 Config Failed");
-		return ret;
-	}
-
-	/* config write latency, auto slow refresh rate */
-	reg_value = (0x0 << APS512XXN_MODE_REG4_READ_RF_RATE |
-			data->write_latency << APS512XXN_MODE_REG4_WRITE_LATENCY_CODE |
-			0x0 << APS512XXN_MODE_REG4_PASR);
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG4_ADDR, reg_value);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 4 Config Failed");
-		return ret;
-	}
-
-	/* config device mode, burst len & disable hybrid burst */
-	reg_value = ((config->dual_octal ? 0 : 1) << APS512XXN_MODE_REG8_BURST_LEN |
-			 0x0 << APS512XXN_MODE_REG8_BURST_TYPE |
-			 0x0 << APS512XXN_MODE_REG8_RBX_READ_EN |
-			 config->dual_octal << APS512XXN_MODE_REG8_TRANSFER_MODE);
-	ret = aps512xxn_write_reg(dev, APS256XXN_MODE_REG8_ADDR, reg_value);
-	if (ret != 0) {
-		LOG_ERR("APS512XXN Mode Reg 8 Config Failed");
-		return ret;
-	}
-
-	aps512xxn_xip_cfg.xip_mod_bits = 0;
-	aps512xxn_xip_cfg.incr_cmd = APS256XXN_CMD_LINEAR_BURST_READ;
-	aps512xxn_xip_cfg.wrap_cmd = APS256XXN_CMD_SYNC_READ;
-	aps512xxn_xip_cfg.write_incr_cmd = APS256XXN_CMD_LINEAR_BURST_WRITE;
-	aps512xxn_xip_cfg.write_wrap_cmd = APS256XXN_CMD_SYNC_WRITE;
-	aps512xxn_xip_cfg.xip_cnt_time_out = config->xip_wait_cycles;
-	aps512xxn_xip_cfg.xip_wait_cycles = config->latency_code - 1;
-
-	/* OSPI xip configuration */
-	ospi_psram_xip_init(config->regs, &aps512xxn_xip_cfg, config->dual_octal);
-
-	/* config address control shim for dual octal mode */
-	if (config->dual_octal) {
-		struct aes_addr_ctrl ram_addr_ctrl;
-		/**
-		 *  SPI address signalling              Corresponding HADDR/AxADDR bits in
-		 *
-		 *   --  RA12 RA4  CA7                        --  23 15  8
-		 *   --  RA11 RA3  CA6                        --  22 14  7
-		 *   --  RA10 RA2  CA5                        --  21 13  6
-		 *   --  RA9  RA1  CA4                        --  20 12  5
-		 *   --  RA8  RA0  CA3                        --  19 11  4
-		 *   --  RA7  --   CA2                        --  18 --  3
-		 *  RA14 RA6  CA9  CA1                        25  17 10  2
-		 *  RA13 RA5  CA8  CA0 (=0)                   24  16 9   1 (=0)
-		 *
-		 *  We massage HADDR using the shim in front of the controller to insert the gap
-		 *  between CA9 and RA0 - between HADDR[10] and HADDR[11].
-		 *  SPI controller shifts HADDR down 1 when in dual octal mode to form a 16-bit word
-		 *  address.
-		 *
-		 *  | Logical Byte Address | After Shift (Word Address) | Meaning            |
-		 *  | -------------------- | -------------------------- | ------------------ |
-		 *  | 0x000000             | 0x000000                   | First 16-bit word  |
-		 *  | 0x000002             | 0x000001                   | Second 16-bit word |
-		 *  | 0x000004             | 0x000002                   | Third 16-bit word  |
-		 *  So, instead of each address pointing to a single byte, now each address points
-		 *  to a 16-bit (2-byte) word.
-		 */
-
-		ram_addr_ctrl.addr_lower_bits   = 11;
-		ram_addr_ctrl.addr_upper_shift  = 12;
-		ram_addr_ctrl.addr_mask         = 0x7FF;
-		if (config->cs_pin == 0) {
-			ram_addr_ctrl.ss0_array_mode_en = 1;
-			ram_addr_ctrl.ss1_array_mode_en = 0;
-		} else if (config->cs_pin == 1) {
-			ram_addr_ctrl.ss0_array_mode_en = 0;
-			ram_addr_ctrl.ss1_array_mode_en = 1;
-		} else {
-			LOG_ERR("Invalid chip select value");
-			return -EINVAL;
-		}
-
-
-		aes_ctrl_xip_addr(config->aes_regs, &ram_addr_ctrl);
-	}
-
-	aes_set_rxds_delay(config->aes_regs, config->rxds_delay);
-
-	aes_enable_xip(config->aes_regs);
-
-	return 0;
+	return ret;
 }
 
 static void OSPI_IRQHandler(const struct device *dev)

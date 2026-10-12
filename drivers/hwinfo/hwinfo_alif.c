@@ -24,39 +24,9 @@
 #define HOST_SYS_RESET_REQ_BY_SESS              BIT(3)
 #define RESET_REQ_TO_THE_POWER_DOMAIN           BIT(4)
 
-static get_device_revision_data_t dev_data;
-static uint8_t dev_serial_num[DEV_SERIAL_NUM_SIZE] = {0};
-
-/**
- * @brief format_contents - converts numbers in src into
- * characters for displaying.
- * parameters,
- * dst - placeholder containing numbers converted to characters.
- * src - placeholder containing numbers to be converted.
- * bytes - length of numbers to be converted.
- */
-static void format_contents(uint8_t *dst, const uint8_t *src, int bytes)
-{
-	uint8_t digit_len = 0;
-	int i = 0, pos = 0;
-
-	for (i = 0; i < bytes; ++i) {
-		/* pass digit length as 2 as two characters need to */
-		/* be printed if the number is more than 0xF */
-		if (src[i] > 0xF) {
-			digit_len = 2;
-		} else {
-			digit_len = 1;
-		}
-
-		/* extra 1 for '\0' */
-		snprintk(&dst[pos], digit_len + 1, "%x", src[i]);
-		pos += digit_len;
-	}
-}
-
 ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 {
+	get_device_revision_data_t dev_data;
 	int ret;
 
 	/* Input validation */
@@ -70,12 +40,13 @@ ssize_t z_impl_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 		return ret;
 	}
 
-	format_contents(&dev_serial_num[0],
-				(uint8_t *)&dev_data.SerialN[0], sizeof(dev_data.SerialN));
 	if (length > DEV_SERIAL_NUM_SIZE) {
 		length = DEV_SERIAL_NUM_SIZE;
 	}
-	memcpy(buffer, dev_serial_num, length);
+	/* hwinfo returns raw ID bytes; callers perform their own encoding.
+	 * Formatting eight bytes as hex into an eight-byte array overflowed it.
+	 */
+	memcpy(buffer, (const void *)dev_data.SerialN, length);
 
 	return length;
 }

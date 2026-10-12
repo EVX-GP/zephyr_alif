@@ -361,6 +361,8 @@ struct timings {
 	uint16_t hact;
 };
 
+#include <zephyr/drivers/video/video_alif_triggered.h>
+
 struct csi_pkt2pkt_time {
 	bool line_sync_pkt_enable;
 	float time_ns;
@@ -373,6 +375,8 @@ struct csi2_dw_data {
 
 	uint32_t sensors_map;
 	uint32_t streaming_map;
+	struct alif_csi_health health;
+	bool capture_guard;
 	struct timings time[CSI2_NUM_SENSORS];
 	struct csi_pkt2pkt_time pkt2pkt_time;
 

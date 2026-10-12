@@ -614,14 +614,13 @@ static int alif_clock_control_set_rate(const struct device *dev,
 	uint32_t frequency = (uint32_t) rate;
 	int32_t ret;
 
+	if (!frequency) {
+		return -EINVAL;
+	}
+
 	ret = alif_clock_control_get_rate(dev, sub_system, &curr_freq);
 	if (ret) {
 		return ret;
-	}
-
-	/* check if current frequency is already same as desired frequency */
-	if (curr_freq == frequency) {
-		return 0;
 	}
 
 	clk_freq = alif_get_input_clock(dev, clk_id);
@@ -635,6 +634,21 @@ static int alif_clock_control_set_rate(const struct device *dev,
 
 	freq_div = DIV_ROUND_CLOSEST(clk_freq, frequency);
 
+	/* Retain the EVX I2S divider limits after moving clock programming here. */
+	switch (clk_id) {
+	case ALIF_I2S0_76M8_CLK:
+	case ALIF_I2S1_76M8_CLK:
+	case ALIF_I2S2_76M8_CLK:
+	case ALIF_I2S3_76M8_CLK:
+	case ALIF_LPI2S_76M8_CLK:
+		if (freq_div < 2U) {
+			return -EINVAL;
+		}
+		break;
+	default:
+		break;
+	}
+
 	alif_get_div_reg_info(clk_id, &div_mask, &div_pos);
 
 	if (!div_mask) {
@@ -644,6 +658,11 @@ static int alif_clock_control_set_rate(const struct device *dev,
 	if (freq_div > div_mask) {
 		LOG_ERR("ERROR: Frequency setting is not supported\n");
 		return -ENOTSUP;
+	}
+
+	/* Validate divider limits before accepting an already-selected rate. */
+	if (curr_freq == frequency) {
+		return 0;
 	}
 
 	alif_set_clock_divisor((mem_addr_t) reg_addr, div_mask, div_pos, freq_div);

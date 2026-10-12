@@ -10,6 +10,7 @@
 #include <zephyr/types.h>
 #include <zephyr/drivers/video-controls.h>
 #include <zephyr/drivers/video.h>
+#include <zephyr/drivers/video/video_alif_triggered.h>
 
 #ifdef __cplusplus
 extern "C" {

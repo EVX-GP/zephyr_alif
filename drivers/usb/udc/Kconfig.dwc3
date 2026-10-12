@@ -43,3 +43,13 @@ config UDC_DWC3_MAX_QMESSAGES
 	default 8
 	help
 	  Maximum number of messages for handling of DWC3 USBD ISR events.
+
+config UDC_DWC3_IN_COMPLETION_TRACE
+	bool "Laboratory IN completion observations"
+	depends on UDC_DWC3
+	default n
+	help
+	  Retain per-endpoint completion counters and the first residual/status/
+	  HWO observation for J-Link RAM readback. Diagnostic only: no recovery,
+	  retries, transfer scheduling, payload changes or acceptance policy.
+	  Uses 1024 bytes of RAM and bounded cache publication in the IRQ path.

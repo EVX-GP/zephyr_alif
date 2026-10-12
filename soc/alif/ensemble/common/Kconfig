@@ -12,6 +12,18 @@ config RTSS_HP
 	help
 	  Enable RTSS_HP core.
 
+config ALIF_OSPI_SHARED_BOOT_CLOCKS
+	bool "Enable both OSPI clocks during paired-core startup and resume"
+	depends on ENSEMBLE_GEN2
+	help
+	  Use the same complete OSPI clock mask in both core images. Select this
+	  in both images when OSPI0 and OSPI1 have different core owners. This
+	  prevents the later core from disabling its peer's clock and avoids a
+	  cross-core read-modify-write race. Both clock gates remain enabled at
+	  startup and SoC resume even when only one controller is enabled in
+	  this core's DTS.
+	  Runtime clock gating still requires coordination between the cores.
+
 config APSS
 	bool "APSS core"
 	help

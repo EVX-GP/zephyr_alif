@@ -85,24 +85,33 @@ static int queue_put(struct k_msgq *msgq, void *mem_block, size_t size)
 	return k_msgq_put(msgq, &item, K_NO_WAIT);
 }
 
+/* EVX: slot width follows the selected sample word size. */
+static enum i2s_dw_wss i2s_dw_word_size_to_wss(uint32_t word_size)
+{
+	if (word_size <= 16U) { return I2S_DW_WSS_16_CYCLES; }
+	if (word_size <= 24U) { return I2S_DW_WSS_24_CYCLES; }
+	return I2S_DW_WSS_32_CYCLES;
+}
+
 /* Clock configuration */
 static int i2s_dw_set_clock_rate(const struct i2s_dw_cfg *cfg,
-				 uint32_t sample_rate)
+				 uint32_t sample_rate, uint32_t word_size)
 {
-	uint32_t sclk;
+	uint64_t sclk;
 
 	if (!sample_rate) {
 		return -EINVAL;
 	}
 
 	/* sclk = 2 * WSS_cycles * sample_rate */
-	sclk = 2 * wss_cycles[cfg->wss_len] * sample_rate;
+	sclk = 2ULL * wss_cycles[i2s_dw_word_size_to_wss(word_size)] * sample_rate;
+	if (sclk > UINT32_MAX) { return -EINVAL; }
 
 	return clock_control_set_rate(cfg->clk_dev, cfg->clkid,
 				      (clock_control_subsys_rate_t)sclk);
 }
 
-static void i2s_dw_enable_controller(const struct device *dev)
+static void i2s_dw_enable_controller(const struct device *dev, uint32_t word_size)
 {
 	const struct i2s_dw_cfg *cfg = dev->config;
 
@@ -112,7 +121,7 @@ static void i2s_dw_enable_controller(const struct device *dev)
 	/* Configure WSS and SCLKG */
 	i2s_reg_write(dev, I2S_DW_CCR,
 		      (cfg->sclkg & I2S_DW_CCR_SCLKG_MASK) |
-		      ((cfg->wss_len << I2S_DW_CCR_WSS_SHIFT) &
+		      ((i2s_dw_word_size_to_wss(word_size) << I2S_DW_CCR_WSS_SHIFT) &
 		       I2S_DW_CCR_WSS_MASK));
 
 	/* Enable clock */
@@ -473,7 +482,8 @@ static int rx_stream_start(const struct device *dev,
 
 	if (is_first_active_stream) {
 		/* Set clock rate */
-		ret = i2s_dw_set_clock_rate(cfg, stream->cfg.frame_clk_freq);
+		ret = i2s_dw_set_clock_rate(cfg, stream->cfg.frame_clk_freq,
+				stream->cfg.word_size);
 		if (ret) {
 			LOG_ERR("Failed to set clock rate: %d", ret);
 			k_mem_slab_free(stream->cfg.mem_slab, stream->mem_block);
@@ -491,7 +501,7 @@ static int rx_stream_start(const struct device *dev,
 
 	if (is_first_active_stream) {
 		/* Configure clock */
-		i2s_dw_enable_controller(dev);
+		i2s_dw_enable_controller(dev, stream->cfg.word_size);
 	}
 
 	/* Clear overrun */
@@ -545,7 +555,8 @@ static int tx_stream_start(const struct device *dev,
 
 	if (is_first_active_stream) {
 		/* Set clock rate */
-		ret = i2s_dw_set_clock_rate(cfg, stream->cfg.frame_clk_freq);
+		ret = i2s_dw_set_clock_rate(cfg, stream->cfg.frame_clk_freq,
+				stream->cfg.word_size);
 		if (ret) {
 			LOG_ERR("Failed to set clock rate: %d", ret);
 			k_mem_slab_free(stream->cfg.mem_slab, stream->mem_block);
@@ -564,7 +575,7 @@ static int tx_stream_start(const struct device *dev,
 
 	if (is_first_active_stream) {
 		/* Configure clock */
-		i2s_dw_enable_controller(dev);
+		i2s_dw_enable_controller(dev, stream->cfg.word_size);
 	}
 
 	/* Clear overrun */
@@ -902,6 +913,13 @@ static int i2s_dw_configure(const struct device *dev, enum i2s_dir dir,
 		return 0;
 	}
 
+	switch (i2s_cfg->word_size) {
+	case 12U: case 16U: case 20U: case 24U: case 32U:
+		break;
+	default:
+		return -EINVAL;
+	}
+
 #ifdef CONFIG_I2S_DW_USE_DMA
 	/*
 	 * TXDMA/RXDMA is stereo-cyclic: each access feeds left then right.
@@ -1167,7 +1185,7 @@ static int i2s_dw_init(const struct device *dev)
 		return ret;
 	}
 
-	i2s_dw_enable_controller(dev);
+	i2s_dw_enable_controller(dev, 32U);
 
 	cfg->irq_config(dev);
 
@@ -1256,7 +1274,7 @@ static int i2s_dw_pm_action(const struct device *dev,
 			return ret;
 		}
 
-		i2s_dw_enable_controller(dev);
+		i2s_dw_enable_controller(dev, 32U);
 		i2s_reg_write(dev, I2S_DW_IMR, data->imr_cache);
 		return 0;
 

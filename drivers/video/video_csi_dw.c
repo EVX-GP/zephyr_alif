@@ -102,6 +102,22 @@ static void csi2_dw_irq(const struct device *dev)
 	bool reset_ipi = false;
 
 	global_st = sys_read32(regs + CSI_INT_ST_MAIN);
+	struct csi2_dw_data *data = dev->data;
+	if (global_st) { data->health.events++; data->health.status |= global_st; }
+	if (global_st && data->capture_guard) {
+		if (global_st & CSI_INT_ST_MAIN_IPI_FATAL) {
+			data->health.ipi_status |= sys_read32(regs + CSI_INT_ST_IPI_FATAL);
+		}
+		/* Preserve first fault, avoid interrupt storms and autonomous IPI reset.
+		 * HP inhibits CPI, then coordinates HE trigger stop before teardown. */
+		const uint16_t masks[] = {CSI_INT_MSK_PHY_FATAL, CSI_INT_MSK_PKT_FATAL,
+			CSI_INT_MSK_PHY, CSI_INT_MSK_LINE, CSI_INT_MSK_IPI_FATAL,
+			CSI_INT_MSK_BNDRY_FRAME_FATAL, CSI_INT_MSK_SEQ_FRAME_FATAL,
+			CSI_INT_MSK_CRC_FRAME_FATAL, CSI_INT_MSK_PLD_CRC_FATAL,
+			CSI_INT_MSK_DATA_ID, CSI_INT_MSK_ECC_CORRECT};
+		for (size_t i = 0; i < ARRAY_SIZE(masks); ++i) { sys_write32(0, regs + masks[i]); }
+		return;
+	}
 	if (global_st & CSI_INT_ST_MAIN_IPI_FATAL) {
 		event_st = sys_read32(regs + CSI_INT_ST_IPI_FATAL);
 		LOG_ERR("Fatal Interrupt at IPI interface. status - 0x%x", event_st);
@@ -350,6 +366,7 @@ static int csi2_dw_validate_data(const struct device *dev)
 		(uint32_t)pixclock);
 
 	tmp = (uint32_t)pixclock;
+	data->health.pixel_clock_requested_hz = tmp;
 	ret = clock_control_set_rate(config->clk_dev, config->pixclk,
 			(clock_control_subsys_rate_t)tmp);
 	if (ret) {
@@ -358,6 +375,11 @@ static int csi2_dw_validate_data(const struct device *dev)
 	}
 
 	if (config->ipi_mode == CSI2_IPI_MODE_TIMINGS_CAM) {
+		/* Record the realized rate without changing the validated timing formula.
+		 * Internal CSI/CPI clock limits and HSD remain vendor/bench gates. */
+		data->health.pixel_clock_realized_hz = 0;
+		(void)clock_control_get_rate(config->clk_dev, config->pixclk,
+			&data->health.pixel_clock_realized_hz);
 		float time_PPI_ns = (4.0 / phy->pll_fin) * 1000000000;
 		float time_IPI_ns = (1.0f / pixclock) * 1000000000;
 		float pkt2pkt_time_ns = data->pkt2pkt_time.time_ns;
@@ -575,7 +597,9 @@ static int csi2_dw_set_format(const struct device *dev, enum video_endpoint_id e
 #else
 	if (data->csi_cpi_settings[data->current_sensor] != NULL) {
 #endif
-		if (tmp == data->csi_cpi_settings[data->current_sensor]->dt) {
+		if (tmp == data->csi_cpi_settings[data->current_sensor]->dt &&
+		    data->time[data->current_sensor].hact == fmt->width &&
+		    data->time[data->current_sensor].vact == fmt->height) {
 			LOG_INF("FourCC format already set.");
 			return 0;
 		}
@@ -649,6 +673,11 @@ static int csi2_dw_set_ctrl(const struct device *dev, unsigned int cid, void *va
 	int ret = 0;
 
 	switch (cid) {
+	case VIDEO_CID_ALIF_CSI_GUARD:
+		if (!value) { return -EINVAL; }
+		if (!*(uint32_t *)value && data->streaming_map) { return -EBUSY; }
+		data->capture_guard = !!*(uint32_t *)value;
+		return 0;
 	case VIDEO_CID_ALIF_CSI_DPHY_FREQ:
 		data->phy[data->current_sensor].pll_fin = *((uint32_t *)value);
 		LOG_DBG("DPHY New PLL Freq. %d", data->phy[data->current_sensor].pll_fin);
@@ -716,6 +745,17 @@ static int csi2_dw_set_ctrl(const struct device *dev, unsigned int cid, void *va
 
 static int csi2_dw_get_ctrl(const struct device *dev, unsigned int cid, void *value)
 {
+	if (cid == VIDEO_CID_ALIF_CSI_HEALTH) {
+		if (!value) { return -EINVAL; }
+		unsigned int key = irq_lock();
+		struct csi2_dw_data *capture = dev->data;
+		struct alif_csi_health *health = value;
+		*health = capture->health;
+		health->pending = sys_read32(DEVICE_MMIO_GET(dev) + CSI_INT_ST_MAIN);
+		irq_unlock(key);
+		return 0;
+	}
+
 	const struct csi2_dw_config *config = dev->config;
 	struct csi2_dw_data *data = dev->data;
 	int ret;
