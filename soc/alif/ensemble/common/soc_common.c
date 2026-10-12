@@ -339,6 +339,13 @@ static int soc_init(void)
 
 
 	/*Clock : OSPI */
+#if defined(CONFIG_ALIF_OSPI_SHARED_BOOT_CLOCKS)
+	/* Both images must use this policy: identical full-register writes are
+	 * independent of core start order. A local IRQ lock or sys_set_bits()
+	 * would not prevent a lost update between the two CPUs.
+	 */
+	sys_write32(BIT(0) | BIT(1), CLKCTRL_PER_SLV_OSPI_CTRL);
+#else
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(ospi0), okay)
 	if (IS_ENABLED(CONFIG_ENSEMBLE_GEN2) ||
 		IS_ENABLED(CONFIG_SOC_SERIES_E1C)) {
@@ -351,6 +358,7 @@ static int soc_init(void)
 		sys_write32(0x2, CLKCTRL_PER_SLV_OSPI_CTRL);
 	}
 #endif
+#endif /* CONFIG_ALIF_OSPI_SHARED_BOOT_CLOCKS */
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(sdhc), okay)
 	/* Enable CFG (100 MHz and 20MHz) clock.*/
