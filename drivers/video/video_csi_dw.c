@@ -903,8 +903,10 @@ static int csi2_dw_pm_action(const struct device *dev, enum pm_device_action act
 	case PM_DEVICE_ACTION_SUSPEND:
 		/* Mask all CSI2 interrupts to prevent spurious PHY errors */
 		irq_disable(config->irq);
-		clock_control_off(config->clk_dev, config->pixclk);
-		clock_control_off(config->clk_dev, config->csiclk);
+		ret = clock_control_off(config->clk_dev, config->pixclk);
+		if (ret) { return ret; }
+		ret = clock_control_off(config->clk_dev, config->csiclk);
+		if (ret) { return ret; }
 		data->streaming_map = 0;
 		return 0;
 
