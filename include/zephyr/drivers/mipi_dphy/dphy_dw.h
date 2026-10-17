@@ -60,6 +60,10 @@ int dphy_dw_slave_setup(const struct device *dev,
 int dphy_dw_slave_select(const struct device *dev,
 		uint8_t slave_id);
 
+/* Caller must own and stop the CSI pipeline. Does not gate shared PHY clocks.
+ * Hold the selected receive backend in reset/shutdown until slave_setup(). */
+int dphy_dw_slave_shutdown(const struct device *dev, uint8_t slave_id);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

@@ -783,6 +783,35 @@ static int dphy_dw_init(const struct device *dev)
 	return 0;
 }
 
+int dphy_dw_slave_shutdown(const struct device *dev, uint8_t slave_id)
+{
+	if (slave_id > 1U) { return -EINVAL; }
+	uintptr_t csi = DEVICE_MMIO_NAMED_GET(dev, csi_reg);
+	uintptr_t dsi = DEVICE_MMIO_NAMED_GET(dev, dsi_reg);
+	uintptr_t regs = DEVICE_MMIO_NAMED_GET(dev, expmst_reg);
+	/* Match the vendor CSI2_DPHY_Uninitialize sequence: disconnect camera 2,
+	 * assert reset, then shutdown. Keep shared clocks available for readback
+	 * and the other backend; setup is required before the next capture. */
+	if (slave_id == 1U) {
+		sys_clear_bits(regs + DSI_CTRL, DSI_CTRL_CAM2_EN);
+		sys_clear_bits(dsi + DSI_PHY_RSTZ, DSI_PHY_RSTZ_PHY_RSTZ);
+		sys_clear_bits(dsi + DSI_PHY_RSTZ, DSI_PHY_RSTZ_PHY_SHUTDOWNZ);
+		if ((sys_read32(regs + DSI_CTRL) & DSI_CTRL_CAM2_EN) ||
+		    (sys_read32(dsi + DSI_PHY_RSTZ) &
+		     (DSI_PHY_RSTZ_PHY_RSTZ | DSI_PHY_RSTZ_PHY_SHUTDOWNZ))) {
+			return -EIO;
+		}
+	} else {
+		sys_clear_bits(csi + CSI_DPHY_RSTZ, CSI_DPHY_RSTZ_DPHY_RSTZ);
+		sys_clear_bits(csi + CSI_PHY_SHUTDOWNZ, CSI_PHY_SHUTDOWNZ_PHY_SHUTDOWNZ);
+		if ((sys_read32(csi + CSI_DPHY_RSTZ) & CSI_DPHY_RSTZ_DPHY_RSTZ) ||
+		    (sys_read32(csi + CSI_PHY_SHUTDOWNZ) & CSI_PHY_SHUTDOWNZ_PHY_SHUTDOWNZ)) {
+			return -EIO;
+		}
+	}
+	return 0;
+}
+
 #ifdef CONFIG_PM_DEVICE
 static int dphy_dw_pm_action(const struct device *dev, enum pm_device_action action)
 {

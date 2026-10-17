@@ -901,6 +901,11 @@ static int csi2_dw_pm_action(const struct device *dev, enum pm_device_action act
 	return 0;
 
 	case PM_DEVICE_ACTION_SUSPEND:
+		if (data->streaming_map) { return -EBUSY; }
+		for (unsigned i = 0; i < config->num_dphys; i++) {
+			ret = dphy_dw_slave_shutdown(config->rx_dphy, config->rx_dphy_ids[i]);
+			if (ret) { return ret; }
+		}
 		/* Mask all CSI2 interrupts to prevent spurious PHY errors */
 		irq_disable(config->irq);
 		ret = clock_control_off(config->clk_dev, config->pixclk);
