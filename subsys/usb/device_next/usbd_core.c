@@ -234,6 +234,7 @@ int usbd_device_shutdown_core(struct usbd_context *const uds_ctx)
 		ret = usbd_class_remove_all(uds_ctx, USBD_SPEED_HS, cfg_value);
 		if (ret) {
 			LOG_ERR("Failed to cleanup registered classes, %d", ret);
+			return ret;
 		}
 	}
 
@@ -243,12 +244,14 @@ int usbd_device_shutdown_core(struct usbd_context *const uds_ctx)
 		ret = usbd_class_remove_all(uds_ctx, USBD_SPEED_FS, cfg_value);
 		if (ret) {
 			LOG_ERR("Failed to cleanup registered classes, %d", ret);
+			return ret;
 		}
 	}
 
 	ret = usbd_desc_remove_all(uds_ctx);
 	if (ret) {
 		LOG_ERR("Failed to cleanup descriptors, %d", ret);
+		return ret;
 	}
 
 	usbd_device_unregister_all_vreq(uds_ctx);

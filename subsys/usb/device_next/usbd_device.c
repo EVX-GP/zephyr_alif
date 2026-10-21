@@ -296,27 +296,21 @@ int usbd_disable(struct usbd_context *const uds_ctx)
 {
 	int ret;
 
-	if (!usbd_is_enabled(uds_ctx)) {
-		LOG_WRN("USB device support is already disabled");
-		return -EALREADY;
-	}
-
 	usbd_device_lock(uds_ctx);
-
+	if (!usbd_is_enabled(uds_ctx)) {
+		ret = -EALREADY;
+		goto out;
+	}
 	ret = usbd_config_set(uds_ctx, 0);
 	if (ret) {
-		LOG_ERR("Failed to reset configuration");
+		goto out;
 	}
-
 	ret = udc_disable(uds_ctx->dev);
-	if (ret) {
-		LOG_ERR("Failed to disable USB device");
+	if (!ret) {
+		uds_ctx->status.enabled = false;
 	}
-
-	uds_ctx->status.enabled = false;
-
+out:
 	usbd_device_unlock(uds_ctx);
-
 	return ret;
 }
 
@@ -325,17 +319,20 @@ int usbd_shutdown(struct usbd_context *const uds_ctx)
 	int ret;
 
 	usbd_device_lock(uds_ctx);
-
-	/* TODO: control request dequeue ? */
-	ret = usbd_device_shutdown_core(uds_ctx);
-	if (ret) {
-		LOG_ERR("Failed to shutdown USB device");
+	/* Disable must establish stopped endpoints/controller before classes
+	 * or descriptors can be removed. Failed teardown is not clean shutdown.
+	 */
+	if (usbd_is_enabled(uds_ctx)) {
+		ret = -EBUSY;
+		goto out;
 	}
-
-	uds_ctx->status.initialized = false;
+	ret = usbd_device_shutdown_core(uds_ctx);
+	if (!ret) {
+		uds_ctx->status.initialized = false;
+	}
+out:
 	usbd_device_unlock(uds_ctx);
-
-	return 0;
+	return ret;
 }
 
 bool usbd_can_detect_vbus(struct usbd_context *const uds_ctx)

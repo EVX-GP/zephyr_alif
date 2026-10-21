@@ -343,61 +343,45 @@ static void usbd_isoc_micro_frame_update(udc_dwc3_driver_t *drv, uint32_t curren
 static int32_t udc_dwc3_stop_transfer(udc_dwc3_driver_t *drv, uint8_t ep_num,
 		uint8_t dir, uint8_t force_rm)
 {
-	udc_dwc3_ep_t *ept;
-	udc_dwc3_trb_t      *trb_ptr;
+	uint8_t phy_ep = USB_GET_PHYSICAL_EP(ep_num, dir);
+	udc_dwc3_ep_t *ept = &drv->eps[phy_ep];
 	udc_dwc3_ep_params_t params = {0};
-	uint8_t phy_ep;
+	int32_t ret;
 	uint32_t cmd;
-	uint32_t ret;
 
-	phy_ep = USB_GET_PHYSICAL_EP(ep_num, dir);
-	ept = &drv->eps[phy_ep];
-	if (ept->trb_enqueue == 0U) {
-		ept->trb_enqueue = NO_OF_TRB_PER_EP - 1;
-	} else {
-		ept->trb_enqueue--;
+	if (ept->ep_resource_index == 0U) {
+		/* Missing resource with outstanding ownership is ambiguous; never
+		 * return buffers or clear the ring on that basis.
+		 */
+		return (ept->trb_enqueue != ept->trb_dequeue ||
+			(ept->ep_status & USB_EP_BUSY)) ? -EBUSY : 0;
 	}
-	/* check the endpoint stall condition */
 	if (ept->ep_status & USB_EP_STALL) {
 		ret = udc_dwc3_send_ep_cmd(drv, phy_ep, USB_DEPCMD_CLEARSTALL, params);
-		if (ret < 0) {
-			LOG_ERR("Failed to send command CLEARSTALL");
-			return ret;
+		if (ret != USB_SUCCESS) {
+			return ret < 0 ? ret : -EIO;
 		}
 		CLEAR_BIT(ept->ep_status, USB_EP_STALL);
 	}
-	if (ept->ep_resource_index == 0U) {
-		return USB_EP_RESOURCE_INDEX_INVALID;
-	}
-	/* Data book says for end transfer  HW needs some
-	 * extra time to synchronize with the interconnect
-	 * - Issue EndTransfer WITH CMDIOC bit set
-	 * - Wait 100us
-	 */
-	cmd = USB_DEPCMD_ENDTRANSFER;
-	cmd |= (force_rm == 1) ? USB_DEPCMD_HIPRI_FORCERM : 0U;
-	SET_BIT(cmd, USB_DEPCMD_CMDIOC);
-	cmd |= USB_DEPCMD_PARAM(ept->ep_resource_index);
-
+	cmd = USB_DEPCMD_ENDTRANSFER | USB_DEPCMD_CMDIOC |
+		USB_DEPCMD_PARAM(ept->ep_resource_index);
+	cmd |= force_rm ? USB_DEPCMD_HIPRI_FORCERM : 0U;
 	ret = udc_dwc3_send_ep_cmd(drv, phy_ep, cmd, params);
-	if (ret < 0) {
-		LOG_ERR("Failed to send command at END transfer");
-		return ret;
+	if (ret != USB_SUCCESS) {
+		return ret < 0 ? ret : -EIO;
 	}
-	trb_ptr = &ept->ep_trb[ept->trb_enqueue];
-	sys_cache_data_invd_range(trb_ptr, sizeof(*trb_ptr));
-
-	if (trb_ptr->ctrl) {
-		trb_ptr->ctrl = 0;
-	}
-	ept->trb_enqueue = 0;
-	if (force_rm == 1) {
-		ept->ep_resource_index = 0U;
-	}
-	CLEAR_BIT(ept->ep_status, USB_EP_BUSY);
+	/* Retain the vendor's interconnect settling interval after checked
+	 * command completion, before changing software/DMA ownership.
+	 */
 	k_busy_wait(100);
-
-	return ret;
+	for (unsigned int i = 0; i < NO_OF_TRB_PER_EP; i++) {
+		ept->ep_trb[i].ctrl = 0;
+	}
+	sys_cache_data_flush_range(ept->ep_trb, sizeof(ept->ep_trb));
+	ept->trb_enqueue = ept->trb_dequeue = 0;
+	ept->ep_resource_index = 0U;
+	CLEAR_BIT(ept->ep_status, USB_EP_BUSY);
+	return 0;
 }
 
 static int32_t udc_dwc3_isoc_send(udc_dwc3_driver_t *drv, uint8_t ep_num, uint8_t dir,
@@ -2219,6 +2203,7 @@ static int udc_dwc3_enable(const struct device *dev)
 	status = udc_dwc3_connect(&priv->drv);
 	if (status != 0) {
 		LOG_ERR("USB controller enable failed");
+		return status < 0 ? status : -EIO;
 	}
 	status = udc_ep_enable_internal(dev, USB_CONTROL_EP_OUT, USB_EP_TYPE_CONTROL,
 			64, 0);
@@ -2346,7 +2331,10 @@ static int udc_dwc3_ep_deactivate(const struct device *dev, struct udc_ep_config
 
 	ep_num = EP_NUM(ep->addr);
 	ep_dir = (ep->addr & USB_EP_DIR_MASK) ? USB_DIR_IN : USB_DIR_OUT;
-	udc_dwc3_stop_transfer(&priv->drv, ep_num, ep_dir, USB_DEPCMD_FORCERM);
+	int ret = udc_dwc3_stop_transfer(&priv->drv, ep_num, ep_dir, USB_DEPCMD_FORCERM);
+	if (ret) {
+		return ret;
+	}
 	return udc_dwc3_ep_disable(&priv->drv, ep_num, ep_dir);
 }
 
@@ -2494,6 +2482,17 @@ static int udc_dwc3_ep_dequeue(const struct device *dev, struct udc_ep_config *e
 {
 	struct net_buf *buf;
 
+	struct udc_dwc3_data *priv = udc_get_private(dev);
+	uint8_t dir = (epcfg->addr & USB_EP_DIR_MASK) ? USB_DIR_IN : USB_DIR_OUT;
+	udc_dwc3_ep_t *ep = &priv->drv.eps[USB_GET_PHYSICAL_EP(EP_NUM(epcfg->addr), dir)];
+
+	/* Dequeue alone is not DMA cancellation. The checked endpoint-disable
+	 * path must complete first; keep buffers owned on ambiguous state.
+	 */
+	if ((ep->ep_status & (USB_EP_ENABLED | USB_EP_BUSY)) ||
+	    ep->ep_resource_index || ep->trb_enqueue != ep->trb_dequeue) {
+		return -EBUSY;
+	}
 	buf = udc_buf_get_all(dev, epcfg->addr);
 	if (buf) {
 		udc_submit_ep_event(dev, buf, -ECONNABORTED);
