@@ -9,6 +9,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/irq.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/usb/udc.h>
 #include <zephyr/drivers/clock_control.h>
@@ -29,6 +30,7 @@ struct udc_dwc3_data {
 	uint32_t irq;
 	struct k_thread thread_data;
 	struct k_msgq dwc3_msgq_data;
+	atomic_t event_epoch;
 	enum udc_bus_speed speed;
 };
 
@@ -48,6 +50,7 @@ struct udc_dwc3_config {
 };
 
 struct udc_dwc3_msg {
+	uint32_t epoch;
 	uint8_t type;
 	uint8_t ep;
 	uint16_t recv_bytes;
@@ -2113,7 +2116,10 @@ void dwc3_suspend_cb(udc_dwc3_driver_t *drv)
 void dwc3_setupstage_cb(udc_dwc3_driver_t *drv)
 {
 	struct udc_dwc3_data *priv = DWC3DATA(drv);
-	struct udc_dwc3_msg msg = {.type = UDC_DWC3_MSG_SETUP};
+	struct udc_dwc3_msg msg = {
+		.type = UDC_DWC3_MSG_SETUP,
+		.epoch = (uint32_t)atomic_get(&priv->event_epoch),
+	};
 	int err;
 
 	memcpy(&msg.setup, &drv->setup_data, sizeof(msg.setup));
@@ -2128,6 +2134,7 @@ void dwc3_data_in_cb(udc_dwc3_driver_t *drv, uint8_t ep_num)
 	struct udc_dwc3_data *priv = DWC3DATA(drv);
 	struct udc_dwc3_msg msg = {
 		.type = UDC_DWC3_MSG_DATA_IN,
+		.epoch = (uint32_t)atomic_get(&priv->event_epoch),
 		.ep = ep_num,
 	};
 	int err;
@@ -2143,6 +2150,7 @@ void dwc3_data_out_cb(udc_dwc3_driver_t *drv, uint8_t ep_num)
 	struct udc_dwc3_data *priv = DWC3DATA(drv);
 	struct udc_dwc3_msg msg = {
 		.type = UDC_DWC3_MSG_DATA_OUT,
+		.epoch = (uint32_t)atomic_get(&priv->event_epoch),
 		.ep = ep_num,
 		.recv_bytes = ep_num ? drv->num_bytes : drv->actual_length,
 	};
@@ -2242,6 +2250,10 @@ static int udc_dwc3_disable(const struct device *dev)
 	}
 	udc_dwc3_disable_events(&priv->drv);
 	cfg->irq_disable_func(dev);
+	/* The checked stop precedes invalidation. Producers are now disabled;
+	 * retain queued messages for normal worker disposal without callbacks.
+	 */
+	atomic_inc(&priv->event_epoch);
 
 	return 0;
 }
@@ -2690,6 +2702,33 @@ static void handle_data_out(struct udc_dwc3_data *priv, uint8_t ep_num, uint16_t
 	}
 }
 
+static void udc_dwc3_handle_msg(const struct device *dev, struct udc_dwc3_msg *msg)
+{
+	struct udc_dwc3_data *priv = udc_get_private(dev);
+
+	/* API/PM teardown and deferred register/queue access share this lock.
+	 * A worker can already have removed a message from the queue when stop
+	 * occurs: purging the queue alone does not fence that stale completion.
+	 */
+	udc_dwc3_lock(dev);
+	if (msg->epoch != (uint32_t)atomic_get(&priv->event_epoch) || !udc_is_enabled(dev)) {
+		udc_dwc3_unlock(dev);
+		return;
+	}
+	switch (msg->type) {
+	case UDC_DWC3_MSG_SETUP:
+		handle_setup_pkt(priv, msg);
+		break;
+	case UDC_DWC3_MSG_DATA_IN:
+		handle_data_in(priv, msg->ep);
+		break;
+	case UDC_DWC3_MSG_DATA_OUT:
+		handle_data_out(priv, msg->ep, msg->recv_bytes);
+		break;
+	}
+	udc_dwc3_unlock(dev);
+}
+
 static void udc_dwc3_thread_handler(void *const arg)
 {
 	const struct device *dev = arg;
@@ -2698,17 +2737,7 @@ static void udc_dwc3_thread_handler(void *const arg)
 
 	while (true) {
 		k_msgq_get(&priv->dwc3_msgq_data, &msg, K_FOREVER);
-		switch (msg.type) {
-		case UDC_DWC3_MSG_SETUP:
-			handle_setup_pkt(priv, &msg);
-			break;
-		case UDC_DWC3_MSG_DATA_IN:
-			handle_data_in(priv, msg.ep);
-			break;
-		case UDC_DWC3_MSG_DATA_OUT:
-			handle_data_out(priv, msg.ep, msg.recv_bytes);
-			break;
-		}
+		udc_dwc3_handle_msg(dev, &msg);
 	}
 }
 
@@ -2823,15 +2852,19 @@ static int udc_dwc3_suspend(const struct device *dev)
 	 * partial transition rather than release its PHY/sleep obligation.
 	 */
 	ret = udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT);
-	if (ret) {
+	if (ret && ret != -EALREADY) {
 		return ret;
 	}
 	ret = udc_ep_disable_internal(dev, USB_CONTROL_EP_IN);
-	if (ret) {
+	if (ret && ret != -EALREADY) {
 		return ret;
 	}
 	/* Disable USB IRQ at NVIC */
 	cfg->irq_disable_func(dev);
+	/* The checked stop precedes invalidation. Producers are now disabled;
+	 * retain queued messages for normal worker disposal without callbacks.
+	 */
+	atomic_inc(&priv->event_epoch);
 	/* Cleanup event buffer */
 	udc_dwc3_cleanup_event_buffer(&priv->drv);
 	/* Disable clock (USB) */
@@ -2883,6 +2916,15 @@ static int udc_dwc3_resume(const struct device *dev)
 		LOG_ERR("PM resume: device_init failed (%d)", ret);
 		goto err_clock_off;
 	}
+	/* Restore the controller, not application connectivity. A stack that
+	 * explicitly disabled USB before suspend must remain disconnected until
+	 * its normal enable API restores endpoints and starts the controller.
+	 */
+	if (!udc_is_enabled(dev)) {
+		udc_dwc3_disable_events(&priv->drv);
+		cfg->irq_disable_func(dev);
+		return 0;
+	}
 
 	/* Enable the default control endpoint */
 	ret = udc_ep_enable_internal(dev, USB_CONTROL_EP_OUT, USB_EP_TYPE_CONTROL,
@@ -2924,19 +2966,27 @@ err_clock_off:
 
 static int udc_dwc3_pm_action(const struct device *dev, enum pm_device_action action)
 {
+	int ret;
+
+	udc_dwc3_lock(dev);
 	switch (action) {
 	case PM_DEVICE_ACTION_SUSPEND:
-		return udc_dwc3_suspend(dev);
+		ret = udc_dwc3_suspend(dev);
+		break;
 	case PM_DEVICE_ACTION_RESUME:
-		return udc_dwc3_resume(dev);
+		ret = udc_dwc3_resume(dev);
+		break;
 	case PM_DEVICE_ACTION_TURN_OFF:
 	case PM_DEVICE_ACTION_TURN_ON:
-		/* Power domain handling is automatic via PM framework */
+		/* This driver does not own the shared SE PHY supply. */
+		ret = -ENOTSUP;
 		break;
 	default:
-		return -ENOTSUP;
+		ret = -ENOTSUP;
+		break;
 	}
-	return 0;
+	udc_dwc3_unlock(dev);
+	return ret;
 }
 #endif /* CONFIG_PM_DEVICE */
 
