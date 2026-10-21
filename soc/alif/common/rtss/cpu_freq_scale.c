@@ -258,7 +258,7 @@ static int dependents_suspend(bool buses_move, const struct device **suspended,
 	return 0;
 }
 
-static int pstate_profile_check(const run_profile_t *dest, bool *buses_move)
+static int pstate_profile_check(run_profile_t *dest, bool *buses_move)
 {
 	run_profile_t last;
 	int err;
@@ -269,17 +269,21 @@ static int pstate_profile_check(const run_profile_t *dest, bool *buses_move)
 		return err;
 	}
 
-	/* A frequency request must not change unrelated ownership. DTS defaults
-	 * can differ from an application-installed run profile. Those differences
-	 * require the system resource owner, not the frequency hook. */
-	if (last.power_domains != dest->power_domains ||
-	    last.memory_blocks != dest->memory_blocks ||
-	    last.ip_clock_gating != dest->ip_clock_gating ||
-	    last.phy_pwr_gating != dest->phy_pwr_gating ||
-	    last.vdd_ioflex_3V3 != dest->vdd_ioflex_3V3 ||
+	/* IO voltage and the always-on source are board/wake policy, not pstate
+	 * controls. Reject a conflicting template before mutating the request. */
+	if (last.vdd_ioflex_3V3 != dest->vdd_ioflex_3V3 ||
 	    last.aon_clk_src != dest->aon_clk_src) {
 		return -EPERM;
 	}
+	/* Runtime owners may have released a PHY or retained memory differently
+	 * from the boot template. A frequency change must neither restore boot
+	 * resources nor discard currently held ones. Preserve the accepted local
+	 * resource request; the caller must exclude concurrent resource writers
+	 * for this transaction (Skyo uses its shared CPU/resource lease). */
+	dest->power_domains = last.power_domains;
+	dest->memory_blocks = last.memory_blocks;
+	dest->ip_clock_gating = last.ip_clock_gating;
+	dest->phy_pwr_gating = last.phy_pwr_gating;
 	*buses_move = (last.run_clk_src != dest->run_clk_src) ||
 	       (last.scaled_clk_freq != dest->scaled_clk_freq);
 	return 0;
