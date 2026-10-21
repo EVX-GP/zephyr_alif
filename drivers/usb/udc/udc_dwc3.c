@@ -2780,46 +2780,22 @@ static int udc_dwc3_driver_preinit(const struct device *dev)
 static bool udc_dwc3_is_transfer_ongoing(struct udc_dwc3_data *priv)
 {
 	udc_dwc3_driver_t *drv = &priv->drv;
-	udc_dwc3_ep_t *ept;
-	udc_dwc3_trb_t *trb_ptr;
-	uint8_t ep_num;
 
-	/* Check control endpoint: if not in SETUP phase, transfer is active */
 	if (drv->ep0_state != EP0_SETUP_PHASE) {
-		LOG_WRN("PM suspend: Control EP has ongoing transfer (ep0_state=%d)",
-			drv->ep0_state);
 		return true;
 	}
+	for (uint8_t ep_num = 2; ep_num < (drv->out_eps + drv->in_eps); ep_num++) {
+		udc_dwc3_ep_t *ept = &drv->eps[ep_num];
 
-	/* Check non-control endpoints */
-	for (ep_num = 2; ep_num < (drv->out_eps + drv->in_eps); ep_num++) {
-		ept = &drv->eps[ep_num];
-
-		/* Skip endpoints that are not enabled */
-		if (!(ept->ep_status & USB_EP_ENABLED)) {
-			continue;
-		}
-
-		/* Skip if no transfer has been started on this endpoint */
-		if (ept->trb_enqueue == ept->trb_dequeue &&
-			!(ept->ep_status & USB_EP_BUSY)) {
-			continue;
-		}
-
-		/* Check HWO bit on the TRB at enqueue index.
-		 * HWO=1: hardware owns TRB, device is ready/waiting for host
-		 * HWO=0: transfer completed, pending software processing
+		/* Hardware-owned and completion-pending transfers both prevent
+		 * clock removal. HWO is not evidence of idle. Disabled endpoints
+		 * may still contain outstanding work after an unsuccessful stop.
 		 */
-		trb_ptr = &ept->ep_trb[ept->trb_enqueue];
-		sys_cache_data_invd_range(trb_ptr, sizeof(*trb_ptr));
-
-		if (!(trb_ptr->ctrl & USB_TRB_CTRL_HWO)) {
-			LOG_WRN("PM suspend: EP %d has ongoing transfer processing",
-				ep_num);
+		if (ept->trb_enqueue != ept->trb_dequeue ||
+		    (ept->ep_status & USB_EP_BUSY)) {
 			return true;
 		}
 	}
-
 	return false;
 }
 
@@ -2843,9 +2819,18 @@ static int udc_dwc3_suspend(const struct device *dev)
 		LOG_ERR("PM suspend: controller stop failed");
 		goto err_restore_events;
 	}
-	/* Disable the control endpoints */
-	udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT);
-	udc_ep_disable_internal(dev, USB_CONTROL_EP_IN);
+	/* A stopped controller is not proof that endpoint cleanup succeeded.
+	 * Leave clocks available on failure; the owner must quarantine the
+	 * partial transition rather than release its PHY/sleep obligation.
+	 */
+	ret = udc_ep_disable_internal(dev, USB_CONTROL_EP_OUT);
+	if (ret) {
+		return ret;
+	}
+	ret = udc_ep_disable_internal(dev, USB_CONTROL_EP_IN);
+	if (ret) {
+		return ret;
+	}
 	/* Disable USB IRQ at NVIC */
 	cfg->irq_disable_func(dev);
 	/* Cleanup event buffer */
