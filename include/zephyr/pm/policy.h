@@ -274,6 +274,15 @@ static inline int64_t pm_policy_next_event_ticks(void)
 
 #if defined(CONFIG_PM) || defined(CONFIG_PM_POLICY_LATENCY_STANDALONE) || defined(__DOXYGEN__)
 /**
+ * @brief Read the strictest native latency request in microseconds.
+ *
+ * Returns SYS_FOREVER_US when unconstrained. Unlike the cached cycle value,
+ * this snapshot remains valid across CPU frequency changes. Do not call from
+ * a latency subscription callback, which already holds the latency lock.
+ */
+int32_t pm_policy_latency_get_us(void);
+
+/**
  * @brief Add a new latency requirement.
  *
  * The system will not enter any power state that would make the system to

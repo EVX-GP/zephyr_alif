@@ -11,6 +11,7 @@
 #include <zephyr/irq.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/drivers/counter.h>
+#include <zephyr/kernel.h>
 
 #include "cortex_m_systick.h"
 
@@ -191,6 +192,27 @@ static const struct device *idle_timer = DEVICE_DT_GET(DT_CHOSEN(zephyr_cortex_m
 #endif /* !CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_NONE */
 
 #if defined(CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_COUNTER)
+static volatile bool idle_timer_fired;
+static void idle_timer_alarm(const struct device *dev, uint8_t channel,
+			     uint32_t ticks, void *user_data)
+{
+	/* The interrupt wakes the CPU; elapsed time is accounted on exit. */
+	ARG_UNUSED(dev);
+	ARG_UNUSED(channel);
+	ARG_UNUSED(ticks);
+	ARG_UNUSED(user_data);
+	idle_timer_fired = true;
+}
+
+static void idle_timer_check(int result)
+{
+	/* Never enter CPU sleep with an unarmed wake timer or unknown timebase.
+	 * The hook API cannot return an error to the PM policy. */
+	if (result != 0) {
+		k_panic();
+	}
+}
+
 /**
  * To simplify the driver, implement the callout to Counter API
  * as hooks that would be provided by platform drivers if
@@ -198,8 +220,21 @@ static const struct device *idle_timer = DEVICE_DT_GET(DT_CHOSEN(zephyr_cortex_m
  */
 void z_cms_lptim_hook_on_lpm_entry(uint64_t max_lpm_time_us)
 {
+	/* Keep both the hardware alarm and the 32-bit system cycle accounting
+	 * within one unambiguous interval. A longer/no-deadline idle is split
+	 * into maintenance wakes; external interrupts may wake it earlier. */
+	uint32_t counter_hz = counter_get_frequency(idle_timer);
+	uint32_t system_hz = sys_clock_hw_cycles_per_sec();
+	uint32_t counter_max = counter_get_max_top_value(idle_timer);
+	if (!counter_hz || !system_hz || counter_max < 2U) { k_panic(); }
+	uint64_t counter_limit_us = ((uint64_t)counter_max / 2U) *
+		USEC_PER_SEC / counter_hz;
+	uint64_t system_limit_us = ((uint64_t)UINT32_MAX / 2U) *
+		USEC_PER_SEC / system_hz;
+	if (max_lpm_time_us > counter_limit_us) { max_lpm_time_us = counter_limit_us; }
+	if (max_lpm_time_us > system_limit_us) { max_lpm_time_us = system_limit_us; }
 	struct counter_alarm_cfg cfg = {
-		.callback = NULL,
+		.callback = idle_timer_alarm,
 		.ticks = counter_us_to_ticks(idle_timer, max_lpm_time_us),
 		.user_data = NULL,
 		.flags = 0,
@@ -208,18 +243,21 @@ void z_cms_lptim_hook_on_lpm_entry(uint64_t max_lpm_time_us)
 	/**
 	 * Disable the counter alarm in case it was already running.
 	 */
-	counter_cancel_channel_alarm(idle_timer, 0);
+	idle_timer_check(counter_cancel_channel_alarm(idle_timer, 0));
+	idle_timer_fired = false;
+	/* A sub-tick timeout must still arm a nonzero hardware period. */
+	if (cfg.ticks == 0) { cfg.ticks = 1; }
 
 	/* Set the alarm using timer that runs the idle.
 	 * Needed rump-up/setting time, lower accurency etc. should be
 	 * included in the exit-latency in the power state definition.
 	 */
-	counter_set_channel_alarm(idle_timer, 0, &cfg);
+	idle_timer_check(counter_set_channel_alarm(idle_timer, 0, &cfg));
 
 	/* Store current value of the selected timer to calculate a
 	 * difference in measurements after exiting the idle state.
 	 */
-	counter_get_value(idle_timer, &idle_timer_pre_idle);
+	idle_timer_check(counter_get_value(idle_timer, &idle_timer_pre_idle));
 }
 
 uint64_t z_cms_lptim_hook_on_lpm_exit(void)
@@ -229,13 +267,39 @@ uint64_t z_cms_lptim_hook_on_lpm_exit(void)
 	 */
 	uint32_t idle_timer_post, idle_timer_diff;
 
-	counter_get_value(idle_timer, &idle_timer_post);
+	idle_timer_check(counter_get_value(idle_timer, &idle_timer_post));
+
+#if DT_NODE_HAS_COMPAT(DT_CHOSEN(zephyr_cortex_m_idle_timer), snps_dw_timers)
+	/* DW alarms reload the down-counter at zero. The count alone cannot
+	 * distinguish an early wake from a complete period plus wake latency.
+	 * IRQs are locked by the caller. Sample pending before re-reading the
+	 * count so a wrap between the first two reads is included consistently.
+	 * The candidate must wake in less than one additional timer period. */
+	bool fired = idle_timer_fired || counter_get_pending_int(idle_timer);
+	idle_timer_check(counter_get_value(idle_timer, &idle_timer_post));
+	if (!fired && counter_get_pending_int(idle_timer)) {
+		fired = true;
+		idle_timer_check(counter_get_value(idle_timer, &idle_timer_post));
+	}
+	uint64_t elapsed_ticks = (uint64_t)idle_timer_pre_idle +
+		(fired ? (uint64_t)counter_get_top_value(idle_timer) + 1U : 0U) -
+		idle_timer_post;
+	uint64_t measured_us = elapsed_ticks * USEC_PER_SEC / counter_get_frequency(idle_timer);
+    return measured_us;
+#endif
 
 	/**
-	 * Check for counter timer overflow
-	 * (TODO: this doesn't work for downcounting timers!)
+	 * Account for one wrap, in the counter's declared direction. As with
+	 * the up-counting path, the wake latency must be shorter than a period.
 	 */
-	if (idle_timer_pre_idle > idle_timer_post) {
+	if (!counter_is_counting_up(idle_timer)) {
+		if (idle_timer_pre_idle >= idle_timer_post) {
+			idle_timer_diff = idle_timer_pre_idle - idle_timer_post;
+		} else {
+			idle_timer_diff = idle_timer_pre_idle +
+				(counter_get_top_value(idle_timer) - idle_timer_post) + 1;
+		}
+	} else if (idle_timer_pre_idle > idle_timer_post) {
 		idle_timer_diff =
 			(counter_get_top_value(idle_timer) - idle_timer_pre_idle) +
 			idle_timer_post + 1;
@@ -389,7 +453,9 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 	 * the counter. (Note: we can assume if idle==true that
 	 * interrupts are already disabled)
 	 */
-	if (IS_ENABLED(CONFIG_TICKLESS_KERNEL) && idle && ticks == K_TICKS_FOREVER) {
+	if (IS_ENABLED(CONFIG_TICKLESS_KERNEL) &&
+	    !IS_ENABLED(CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_COUNTER) &&
+	    idle && ticks == K_TICKS_FOREVER) {
 		SysTick->CTRL &= ~SysTick_CTRL_ENABLE_Msk;
 		last_load = TIMER_STOPPED;
 		return;
@@ -397,7 +463,7 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 
 #if !defined(CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_NONE)
 	if (idle) {
-		uint64_t timeout_us =
+		uint64_t timeout_us = ticks == K_TICKS_FOREVER ? UINT64_MAX :
 			((uint64_t)ticks * USEC_PER_SEC) / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
 
 		timeout_idle = true;

@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
 #include <se_service.h>
 
 #if defined(CONFIG_SOC_FAMILY_BALLETTO)
@@ -194,23 +195,20 @@ static const struct alif_clk_dep clk_deps[] = {
 
 DT_FOREACH_CHILD_STATUS_OKAY(DT_PATH(performance_states), ALIF_DEFINE_PSTATE)
 
-static bool pm_ignore(int err)
+static int dependents_resume(const struct device *const *suspended, size_t n)
 {
-	return err == 0 || err == -ENOSYS || err == -ENOTSUP || err == -EALREADY;
-}
-
-static void dependents_resume(const struct device *const *suspended, size_t n)
-{
-	int err;
+	int err, first_error = 0;
 
 	while (n > 0U) {
 		n--;
 		err = pm_device_action_run(suspended[n], PM_DEVICE_ACTION_RESUME);
-		if (!pm_ignore(err)) {
+		if (err && err != -EALREADY) {
 			LOG_ERR("pm resume %s failed (%d)",
 				suspended[n]->name, err);
+			if (!first_error) { first_error = err; }
 		}
 	}
+	return first_error;
 }
 
 /* Suspend clock dependents. -EALREADY means the app already parked the
@@ -236,22 +234,22 @@ static int dependents_suspend(bool buses_move, const struct device **suspended,
 		 */
 		if (pm_device_is_busy(clk_deps[i].dev)) {
 			LOG_ERR("pm suspend %s busy", clk_deps[i].dev->name);
-			dependents_resume(suspended, n);
+			int recovery = dependents_resume(suspended, n);
 			*n_suspended = 0U;
-			return -EBUSY;
+			return recovery ? recovery : -EBUSY;
 		}
 
 		err = pm_device_action_run(clk_deps[i].dev,
 					   PM_DEVICE_ACTION_SUSPEND);
-		if (err == -ENOSYS || err == -ENOTSUP || err == -EALREADY) {
+		if (err == -EALREADY) {
 			continue;
 		}
 		if (err) {
 			LOG_ERR("pm suspend %s failed (%d)",
 				clk_deps[i].dev->name, err);
-			dependents_resume(suspended, n);
+			int recovery = dependents_resume(suspended, n);
 			*n_suspended = 0U;
-			return err;
+			return recovery ? recovery : err;
 		}
 		suspended[n++] = clk_deps[i].dev;
 	}
@@ -260,22 +258,39 @@ static int dependents_suspend(bool buses_move, const struct device **suspended,
 	return 0;
 }
 
-static bool buses_move_from_last(const run_profile_t *dest)
+static int pstate_profile_check(const run_profile_t *dest, bool *buses_move)
 {
 	run_profile_t last;
 	int err;
 
 	err = se_service_get_last_set_run_cfg(&last);
 	if (err) {
-		/* No cache yet: treat as a bus change so dependents re-init. */
-		return true;
+		/* Without an accepted baseline, resource preservation is unknown. */
+		return err;
 	}
 
-	return (last.run_clk_src != dest->run_clk_src) ||
+	/* A frequency request must not change unrelated ownership. DTS defaults
+	 * can differ from an application-installed run profile. Those differences
+	 * require the system resource owner, not the frequency hook. */
+	if (last.power_domains != dest->power_domains ||
+	    last.memory_blocks != dest->memory_blocks ||
+	    last.ip_clock_gating != dest->ip_clock_gating ||
+	    last.phy_pwr_gating != dest->phy_pwr_gating ||
+	    last.vdd_ioflex_3V3 != dest->vdd_ioflex_3V3 ||
+	    last.aon_clk_src != dest->aon_clk_src) {
+		return -EPERM;
+	}
+	*buses_move = (last.run_clk_src != dest->run_clk_src) ||
 	       (last.scaled_clk_freq != dest->scaled_clk_freq);
+	return 0;
 }
 
-int cpu_freq_pstate_set(const struct pstate *state)
+static K_MUTEX_DEFINE(pstate_lock);
+/* Local transaction debt. A failed transition is not an accepted baseline
+ * for a later request. Recovery requires restart until checked rollback exists. */
+static int pstate_fault;
+
+static int pstate_apply(const struct pstate *state)
 {
 	const struct alif_pstate_cfg *cfg;
 	const struct device *suspended[ARRAY_SIZE(clk_deps)];
@@ -287,6 +302,7 @@ int cpu_freq_pstate_set(const struct pstate *state)
 	if (state == NULL || state->config == NULL) {
 		return -EINVAL;
 	}
+	if (k_is_in_isr()) { return -EWOULDBLOCK; }
 
 	cfg = state->config;
 	if (cfg->cpu_hz == 0U) {
@@ -295,10 +311,14 @@ int cpu_freq_pstate_set(const struct pstate *state)
 	}
 
 	profile = cfg->profile;
-	buses_move = buses_move_from_last(&profile);
+	err = pstate_profile_check(&profile, &buses_move);
+	if (err) { return err; }
 
 	err = dependents_suspend(buses_move, suspended, &n_suspended);
 	if (err) {
+		/* A PM callback may modify hardware before reporting an error.
+		 * Conservatively retain debt even if it rejected before modification. */
+		pstate_fault = err;
 		return err;
 	}
 
@@ -314,14 +334,43 @@ int cpu_freq_pstate_set(const struct pstate *state)
 	}
 	irq_unlock(key);
 
-	dependents_resume(suspended, n_suspended);
+	int resume_error = dependents_resume(suspended, n_suspended);
 
 	if (err) {
+		pstate_fault = err;
 		LOG_ERR("set_run_cfg_poll failed (%d)", err);
 		return err;
 	}
+	if (resume_error) { pstate_fault = resume_error; return resume_error; }
 
 	LOG_DBG("pstate applied, cpu_hz=%u buses_move=%d", cfg->cpu_hz,
 		buses_move);
 	return 0;
+}
+
+int cpu_freq_pstate_set(const struct pstate *state)
+{
+	if (state == NULL || state->config == NULL) { return -EINVAL; }
+	if (k_is_in_isr()) { return -EWOULDBLOCK; }
+	if (k_mutex_lock(&pstate_lock, K_NO_WAIT)) { return -EBUSY; }
+	if (pstate_fault) {
+		int err = pstate_fault;
+		k_mutex_unlock(&pstate_lock);
+		return err;
+	}
+#if defined(CONFIG_PM)
+	for (enum pm_state s = PM_STATE_RUNTIME_IDLE; s < PM_STATE_COUNT; ++s) {
+		pm_policy_state_lock_get(s, PM_ALL_SUBSTATES);
+	}
+#endif
+	int err = pstate_apply(state);
+#if defined(CONFIG_PM)
+	if (!pstate_fault) {
+		for (enum pm_state s = PM_STATE_RUNTIME_IDLE; s < PM_STATE_COUNT; ++s) {
+			pm_policy_state_lock_put(s, PM_ALL_SUBSTATES);
+		}
+	}
+#endif
+	k_mutex_unlock(&pstate_lock);
+	return err;
 }

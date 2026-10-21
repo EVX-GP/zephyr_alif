@@ -8,6 +8,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/counter.h>
+#include <zephyr/kernel.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/reset.h>
@@ -17,6 +18,13 @@
 LOG_MODULE_REGISTER(dw_timer, CONFIG_COUNTER_LOG_LEVEL);
 
 static int counter_dw_timer_get_value(const struct device *timer_dev, uint32_t *ticks);
+
+/* Temporary read-only bench observer; remove after pending-IRQ diagnosis. */
+__weak void counter_dw_timer_observe(const struct device *dev, uint32_t phase)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(phase);
+}
 
 /* DW APB timer register offsets */
 #define LOADCOUNT_OFST           0x0
@@ -62,7 +70,24 @@ struct counter_dw_timer_config {
 
 	/* interrupt config function ptr */
 	void (*irq_config)(void);
+	uint32_t irq_num;
 };
+
+/* Call only after stopping the timer and acknowledging its peripheral event.
+ * Clearing EOI alone does not clear a latched NVIC request while IRQs are locked.
+ * Do not clear after rearming: that could discard the new alarm's wake event. */
+static void counter_dw_timer_clear_pending(const struct device *dev)
+{
+#if defined(CONFIG_CPU_CORTEX_M)
+	counter_dw_timer_observe(dev, 0);
+	__DSB();
+	NVIC_ClearPendingIRQ(DEV_CFG(dev)->irq_num);
+	__DSB();
+	counter_dw_timer_observe(dev, 1);
+#else
+	ARG_UNUSED(dev);
+#endif
+}
 
 /* Driver data */
 struct counter_dw_timer_drv_data {
@@ -252,18 +277,49 @@ static int counter_dw_timer_set_alarm(const struct device *timer_dev, uint8_t ch
 	data->alarm_cb = alarm_cfg->callback;
 	data->prv_data = alarm_cfg->user_data;
 
+	/* Mask before changing enable/load: the low-frequency clock domain may
+	 * still expose the old countdown until reload synchronization completes. */
+	sys_set_bit(reg_base + CONTROLREG_OFST, TIMER_INTR_MASK_BIT);
 	sys_clear_bit(reg_base + CONTROLREG_OFST, TIMER_CONTROL_ENABLE_BIT);
 
 	/* start timer in user-defined mode */
 	sys_set_bit(reg_base + CONTROLREG_OFST, TIMER_MODE_BIT);
-	sys_clear_bit(reg_base + CONTROLREG_OFST, TIMER_INTR_MASK_BIT);
 
+	uint32_t previous = sys_read32(reg_base + CURRENTVAL_OFST);
 	sys_write32(alarm_cfg->ticks, reg_base + LOADCOUNT_OFST);
 	sys_set_bit(reg_base + CONTROLREG_OFST, TIMER_CONTROL_ENABLE_BIT);
 
+	/* The low-frequency counter does not latch LOAD synchronously with the
+	 * APB enable write. Do not expose the stale/free-running value to elapsed
+	 * time consumers. Observe an actual counter edge in the new range, bounded
+	 * by two source-clock periods plus polling margin. */
+	uint32_t freq = counter_get_frequency(timer_dev);
+	uint32_t budget = freq ? DIV_ROUND_UP(2000000U, freq) + 10U : 0U;
+	bool started = false;
+	for (uint32_t us = 0; us < budget; ++us) {
+		uint32_t current = sys_read32(reg_base + CURRENTVAL_OFST);
+		if (current != previous && current <= alarm_cfg->ticks) {
+			started = true;
+			break;
+		}
+		k_busy_wait(1);
+	}
+	if (!started) {
+		sys_write32(BIT(TIMER_INTR_MASK_BIT), reg_base + CONTROLREG_OFST);
+		(void)sys_read32(reg_base + EOI_OFST);
+		counter_dw_timer_clear_pending(timer_dev);
+		data->alarm_cb = NULL;
+		data->prv_data = NULL;
+	} else {
+		/* Preserve a genuine expiry during synchronization; do not clear EOI
+		 * or NVIC here. Unmask only after the new counter is visible. */
+		counter_dw_timer_observe(timer_dev, 2);
+		sys_clear_bit(reg_base + CONTROLREG_OFST, TIMER_INTR_MASK_BIT);
+		counter_dw_timer_observe(timer_dev, 3);
+	}
 	k_spin_unlock(&data->lock, key);
 
-	return 0;
+	return started ? 0 : -ETIMEDOUT;
 }
 
 static int counter_dw_timer_cancel_alarm(const struct device *timer_dev, uint8_t chan_id)
@@ -275,7 +331,10 @@ static int counter_dw_timer_cancel_alarm(const struct device *timer_dev, uint8_t
 
 	key = k_spin_lock(&data->lock);
 
-	sys_write32(0, reg_base + CONTROLREG_OFST);
+	sys_write32(BIT(TIMER_INTR_MASK_BIT), reg_base + CONTROLREG_OFST);
+	/* A canceled alarm must not become the next alarm's pending event. */
+	(void)sys_read32(reg_base + EOI_OFST);
+	counter_dw_timer_clear_pending(timer_dev);
 
 	data->alarm_cb = NULL;
 	data->prv_data = NULL;
@@ -298,7 +357,14 @@ uint32_t counter_dw_timer_get_freq(const struct device *timer_dev)
 #endif
 }
 
+static uint32_t counter_dw_timer_get_pending_int(const struct device *timer_dev)
+{
+	uintptr_t reg_base = DEVICE_MMIO_NAMED_GET(timer_dev, timer_mmio);
+	return sys_read32(reg_base + INTSTAT_OFST) != 0;
+}
+
 static DEVICE_API(counter, dw_timer_driver_api) = {
+	.get_pending_int = counter_dw_timer_get_pending_int,
 	.start = counter_dw_timer_start,
 	.stop = counter_dw_timer_disable,
 	.get_value = counter_dw_timer_get_value,
@@ -359,6 +425,12 @@ static int counter_dw_timer_init(const struct device *timer_dev)
 	}
 #endif
 
+	/* A debugger/application restart need not reset this peripheral. Stop and
+	 * mask an inherited alarm before exposing its IRQ with fresh callbacks. */
+	uintptr_t reg_base = DEVICE_MMIO_NAMED_GET(timer_dev, timer_mmio);
+	sys_write32(BIT(TIMER_INTR_MASK_BIT), reg_base + CONTROLREG_OFST);
+	(void)sys_read32(reg_base + EOI_OFST);
+	counter_dw_timer_clear_pending(timer_dev);
 	timer_config->irq_config();
 
 	return 0;
@@ -392,6 +464,7 @@ static int counter_dw_timer_init(const struct device *timer_dev)
 		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, resets),			\
 			(DW_SNPS_TIMER_SNPS_RESET_SPEC_INIT(inst)))		\
 		.irq_config = counter_dw_timer_irq_config_##inst,		\
+		.irq_num = DT_INST_IRQN(inst),				\
 	};									\
 	DEVICE_DT_INST_DEFINE(inst,						\
 			counter_dw_timer_init,					\

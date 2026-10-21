@@ -22,6 +22,15 @@ int32_t max_latency_cyc = -1;
 /** List of latency change subscribers. */
 static sys_slist_t latency_subs;
 
+int32_t pm_policy_latency_get_us(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&latency_lock);
+	int32_t value = max_latency_us;
+
+	k_spin_unlock(&latency_lock, key);
+	return value;
+}
+
 /** @brief Update maximum allowed latency. */
 static void update_max_latency(void)
 {

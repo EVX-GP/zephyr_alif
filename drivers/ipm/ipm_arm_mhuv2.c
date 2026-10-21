@@ -331,11 +331,15 @@ static void mhuv2_isr(const struct device *dev)
 static int mhuv2_poll_out(const struct device *dev, uint32_t ch_id,
 			const void *pdata, int size, k_timeout_t timeout)
 {
+	if (dev == NULL || pdata == NULL) {
+		return -EINVAL;
+	}
 	const struct mhuv2_device_config *config	= DRV_MHUV2_CFG(dev);
 	struct mhuv2_device_data *data			= DRV_MHUV2_DATA(dev);
 	uint64_t usec_timeout;
 	bool ack = false;
 	bool prev_irq_en_sts = false;
+	uint32_t prev_int_en;
 	int ret;
 
 	ARG_UNUSED(size);
@@ -351,6 +355,7 @@ static int mhuv2_poll_out(const struct device *dev, uint32_t ch_id,
 	struct MHUV2_SND *SND = (struct MHUV2_SND *)DEVICE_MMIO_GET(dev);
 
 	prev_irq_en_sts = irq_is_enabled(config->irq_num);
+	prev_int_en = SND->INT_EN;
 	if (prev_irq_en_sts) {
 		/* Disable interrupt if enabled previously */
 		irq_disable(config->irq_num);
@@ -366,12 +371,13 @@ static int mhuv2_poll_out(const struct device *dev, uint32_t ch_id,
 
 	ret = mhuv2_send_access_request(SND, true);
 	if (ret < 0) {
-		return ret;
+		goto restore_failed_request;
 	}
 
 	/* Send busy error if the previous ch xfer is not yet completed */
 	if ((SND->CHANNEL[ch_id].CH_ST & MHU_CH_INT_ST_SET) == MHU_CH_INT_ST_SET) {
-		return -EBUSY;
+		ret = -EBUSY;
+		goto restore_failed_request;
 	}
 
 	/* Clear any pending channel interrupts */
@@ -414,6 +420,17 @@ static int mhuv2_poll_out(const struct device *dev, uint32_t ch_id,
 	}
 
 	return 0;
+
+restore_failed_request:
+	/* No new transfer was submitted. Restore interrupt ownership, including
+	 * the channel-complete interrupt for a pre-existing asynchronous send.
+	 * Do not release access belonging to that outstanding transfer. Access
+	 * acquisition timeout has already cleared its request in the helper. */
+	SND->INT_EN = prev_int_en;
+	if (prev_irq_en_sts) {
+		irq_enable(config->irq_num);
+	}
+	return ret;
 }
 
 /**

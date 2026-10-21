@@ -514,6 +514,9 @@ void z_sys_poweroff(void)
 		LOG_DBG("Subsystem did not go to OFF state");
 	}
 
-	CODE_UNREACHABLE;
+	/* sys_poweroff() is noreturn, but a wake event may abort subsystem OFF.
+	 * Never fall through an unreachable-code assumption with power still on
+	 * and interrupts disabled. A resumable attempt must use the PM path. */
+	k_panic();
 }
 #endif

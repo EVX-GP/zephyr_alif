@@ -22,6 +22,36 @@ LOG_MODULE_REGISTER(ethos_u, CONFIG_ARM_ETHOS_U_LOG_LEVEL);
 
 #define DT_DRV_COMPAT arm_ethos_u
 
+#if defined(CONFIG_PM)
+/* HAL invokes these hooks for every inference, including direct callers.
+ * Keep normal interrupt-driven WFI available, but exclude system PM while
+ * the NPU owns an asynchronous job. Reuse native reference-counted locks.
+ * The HAL calls end before its best-effort error reset; an error therefore
+ * retains the locks until reboot rather than asserting successful cleanup.
+ * Hardware clock/power Q-channel control remains owned by the Arm HAL.
+ */
+void ethosu_inference_begin(struct ethosu_driver *drv, void *user_arg)
+{
+	ARG_UNUSED(drv);
+	ARG_UNUSED(user_arg);
+	for (enum pm_state state = PM_STATE_RUNTIME_IDLE; state < PM_STATE_COUNT; state++) {
+		pm_policy_state_lock_get(state, PM_ALL_SUBSTATES);
+	}
+}
+
+void ethosu_inference_end(struct ethosu_driver *drv, void *user_arg)
+{
+	ARG_UNUSED(user_arg);
+	if (drv->job.result != ETHOSU_JOB_RESULT_OK) {
+		LOG_ERR("NPU job failed; system PM remains locked until restart");
+		return;
+	}
+	for (enum pm_state state = PM_STATE_RUNTIME_IDLE; state < PM_STATE_COUNT; state++) {
+		pm_policy_state_lock_put(state, PM_ALL_SUBSTATES);
+	}
+}
+#endif
+
 /*******************************************************************************
  * Re-implementation/Overrides __((weak)) symbol functions from ethosu_driver.c
  * To handle mutex and semaphores
