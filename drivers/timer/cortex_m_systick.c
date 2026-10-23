@@ -490,6 +490,11 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 		sys_clock_disable();
 
 		cycle_count += elapsed();
+		/* The stopped partial period is now committed. A shallow or rejected
+		 * PM transition need not reset SysTick in hardware; clear VAL here so
+		 * elapsed() cannot count that same partial period again on idle exit
+		 * or while sys_clock_announce() schedules the next timeout. */
+		SysTick->VAL = 0;
 		overflow_cyc = 0;
 #endif /* !CONFIG_CORTEX_M_SYSTICK_RESET_BY_LPM */
 		return;
